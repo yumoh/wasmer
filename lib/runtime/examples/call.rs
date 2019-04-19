@@ -1,4 +1,7 @@
-use wasmer_runtime::{Compiler, error, imports, Ctx, Func, Value, backends::Cranelift};
+use wasmer_runtime::{
+    config::{Backend, Metering},
+    error, imports, Compiler, Ctx, Func, Value,
+};
 
 use wabt::wat2wasm;
 
@@ -36,7 +39,7 @@ fn foobar(_ctx: &mut Ctx) -> i32 {
     42
 }
 
-fn do_panic(ctx: &mut Ctx<usize>) -> Result<i32, String> {
+fn do_panic(ctx: &mut Ctx<i32>) -> Result<i32, String> {
     println!("the number was {}", ctx.data);
     Err("test error".to_string())
 }
@@ -59,13 +62,19 @@ fn main() -> Result<(), error::Error> {
 
     let wasm = get_wasm();
 
-    let compiler: Compiler<Cranelift> = Compiler::new().build();
+    let compiler = Compiler::new()
+        .backend(Backend::LLVM)
+        .metering(Metering {
+            /* ... */
+            ..Metering::default()
+        })
+        .build();
 
     let module = compiler.module(&wasm).compile()?;
 
     let instance = module.instantiate(&imports)?;
 
-    let foo: Func<(), i32> = instance.func("dbz")?;
+    let foo: Func<(), i32, _> = instance.func("dbz")?;
 
     let result = foo.call();
 

@@ -3,27 +3,34 @@ use crate::module::ResourceIndex;
 pub struct Allowed {
     pub float_ops: bool,
     pub indirect_calls: bool,
-    _non_exhaustive: (),
+
+    #[doc(hidden)]
+    #[deprecated(note = "This field exists to make this struct non-exhaustive.")]
+    pub __non_exhaustive: (),
 }
 
 impl Default for Allowed {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
             float_ops: true,
             indirect_calls: true,
-            _non_exhaustive: (),
+            __non_exhaustive: (),
         }
     }
 }
 
 pub struct Metering {
-    _non_exhaustive: (),
+    #[doc(hidden)]
+    #[deprecated(note = "This field exists to make this struct non-exhaustive.")]
+    pub __non_exhaustive: (),
 }
 
 impl Default for Metering {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
-            _non_exhaustive: (),
+            __non_exhaustive: (),
         }
     }
 }

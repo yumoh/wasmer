@@ -87,7 +87,8 @@ pub struct Module {
 }
 
 impl Module {
-    pub(crate) fn new(inner: Arc<ModuleInner>) -> Self {
+    #[doc(hidden)]
+    pub fn new(inner: Arc<ModuleInner>) -> Self {
         Module { inner }
     }
 

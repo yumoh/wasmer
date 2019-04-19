@@ -110,16 +110,16 @@ pub mod units {
     pub use wasmer_runtime_core::units::{Bytes, Pages};
 }
 
-pub mod backends;
 pub mod builder;
 pub mod cache;
 
-use wasmer_runtime_core::config::CompileConfig;
 #[doc(inline)]
 pub use self::builder::Compiler;
+use wasmer_runtime_core::config::CompileConfig;
 
 pub mod config {
     pub use super::builder::{Allowed, Metering};
+    pub use wasmer_runtime_core::backend::Backend;
 }
 
 // /// Compile WebAssembly binary code into a [`Module`].

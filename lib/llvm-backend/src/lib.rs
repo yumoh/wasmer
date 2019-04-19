@@ -1,7 +1,7 @@
 #![cfg_attr(nightly, feature(unwind_attributes))]
 
 use wasmer_runtime_core::{
-    backend::{Compiler},
+    backend::Compiler,
     cache::{Artifact, Error as CacheError},
     config::CompileConfig,
     error::CompileError,

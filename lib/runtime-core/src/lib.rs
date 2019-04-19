@@ -69,7 +69,6 @@ pub fn compile_with(
     wasm: &[u8],
     compiler: &dyn backend::Compiler,
 ) -> CompileResult<module::Module> {
-
     let metering = config::Metering::default();
     let allowed = config::Allowed::default();
     let config = config::CompileConfig {

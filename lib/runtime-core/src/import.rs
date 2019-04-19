@@ -8,9 +8,9 @@ use std::collections::VecDeque;
 use std::{
     cell::{Ref, RefCell},
     ffi::c_void,
+    iter,
     marker::PhantomData,
     rc::Rc,
-    iter,
 };
 
 pub enum NamespaceItem<'a, Data = ()> {
@@ -31,17 +31,15 @@ impl<'a, Data> NamespaceItem<'a, Data> {
             Inst(ExportIter<'a, Data>),
             Ns(HashMapIter<'a, String, Export<'a>>),
         }
-        
+
         let mut export_iter = match self {
             NamespaceItem::Instance(inst) => Iter::Inst(inst.exports()),
             NamespaceItem::Namespace(ns) => Iter::Ns(ns.map.iter()),
         };
 
-        iter::from_fn(move || {
-            match &mut export_iter {
-                Iter::Inst(iter) => iter.next(),
-                Iter::Ns(ns) => ns.next().map(|(name, export)| (&**name, export.clone())),
-            }
+        iter::from_fn(move || match &mut export_iter {
+            Iter::Inst(iter) => iter.next(),
+            Iter::Ns(ns) => ns.next().map(|(name, export)| (&**name, export.clone())),
         })
     }
 

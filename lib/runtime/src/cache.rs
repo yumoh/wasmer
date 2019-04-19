@@ -6,6 +6,7 @@ use std::{
     path::PathBuf,
 };
 
+use wasmer_runtime_core::backend::Backend;
 use wasmer_runtime_core::cache::Error as CacheError;
 pub use wasmer_runtime_core::cache::{Artifact, Cache, WasmHash, WASMER_VERSION_HASH};
 
@@ -94,7 +95,41 @@ impl Cache for FileSystemCache {
         let mmap = unsafe { Mmap::map(&file)? };
 
         let serialized_cache = Artifact::deserialize(&mmap[..])?;
-        unsafe { wasmer_runtime_core::load_cache_with(serialized_cache, super::default_compiler()) }
+
+        let backend = serialized_cache.info().backend;
+
+        let load_cache =
+            |backend| unsafe { wasmer_runtime_core::load_cache_with(serialized_cache, backend) };
+
+        match backend {
+            Backend::Singlepass => {
+                #[cfg(feature = "backend:singlepass")]
+                {
+                    use wasmer_singlepass_backend::SinglePassCompiler;
+                    load_cache(&SinglePassCompiler::new())
+                }
+                #[cfg(not(feature = "backend:singlepass"))]
+                unimplemented!("the singlepass backend is not enabled, try rebuilding with the \"backend:singlepass\" feature enabled")
+            }
+            Backend::Cranelift => {
+                #[cfg(feature = "backend:cranelift")]
+                {
+                    use wasmer_clif_backend::CraneliftCompiler;
+                    load_cache(&CraneliftCompiler::new())
+                }
+                #[cfg(not(feature = "backend:cranelift"))]
+                unimplemented!("the cranelift backend is not enabled, try rebuilding with the \"backend:cranelift\" feature enabled")
+            }
+            Backend::LLVM => {
+                #[cfg(feature = "backend:llvm")]
+                {
+                    use wasmer_llvm_backend::LLVMCompiler;
+                    load_cache(&LLVMCompiler::new())
+                }
+                #[cfg(not(feature = "backend:llvm"))]
+                unimplemented!("the llvm backend is not enabled, try rebuilding with the \"backend:llvm\" feature enabled")
+            }
+        }
     }
 
     fn store(&mut self, key: WasmHash, module: Module) -> Result<(), CacheError> {
