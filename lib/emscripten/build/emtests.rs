@@ -7,6 +7,7 @@
 use glob::glob;
 use std::collections::HashSet;
 use std::fs;
+use std::str;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -23,29 +24,8 @@ const EXCLUDES: [&str; 0] = [];
 
 pub fn compile(file: &str, ignores: &HashSet<String>) -> Option<String> {
     let mut output_path = PathBuf::from(file);
-    output_path.set_extension("out");
-    //    let output_str = output_path.to_str().unwrap();
-
-    // Compile to .out
-    //    Command::new("cc")
-    //        .arg(file)
-    //        .arg("-o")
-    //        .arg(output_str)
-    //        .output()
-    //        .expect("failed to execute process");
-
-    // Get the result of .out
-    //    let output = Command::new(output_str)
-    //        .arg(output_str)
-    //        .output()
-    //        .expect("failed to execute process");
-
-    // Remove executable
-    //    fs::remove_file(output_str).unwrap();
-
-    let mut output_path = PathBuf::from(file);
     output_path.set_extension("js");
-    let output_str = output_path.to_str().unwrap();
+    let output_js = output_path.to_str().unwrap();
 
     let wasm_file_metadata = {
         let mut wasm_file_path = PathBuf::from(file);
@@ -55,34 +35,9 @@ pub fn compile(file: &str, ignores: &HashSet<String>) -> Option<String> {
 
     let real_file = File::open(file).unwrap();
     let file_metadata = real_file.metadata().unwrap();
-    if wasm_file_metadata.is_none()
-        || file_metadata.modified().unwrap() >= wasm_file_metadata.unwrap().modified().unwrap()
-    {
-        // Compile to wasm
-        let _wasm_compilation = Command::new("emcc")
-            .arg(file)
-            .arg("-s")
-            .arg("WASM=1")
-            .arg("-o")
-            .arg(output_str)
-            .output()
-            .expect("failed to execute process");
-
-        // panic!("{:?}", wasm_compilation);
-        // if output.stderr {
-        //     panic!("{}", output.stderr);
-        // }
-        // Remove js file
-
-        if Path::new(output_str).is_file() {
-            fs::remove_file(output_str).unwrap();
-        } else {
-            println!("Output JS not found: {}", output_str);
-        }
-    }
 
     let mut output_path = PathBuf::from(file);
-    output_path.set_extension("output");
+    
     let module_name = output_path
         .file_stem()
         .unwrap()
@@ -90,23 +45,92 @@ pub fn compile(file: &str, ignores: &HashSet<String>) -> Option<String> {
         .unwrap()
         .to_owned();
 
-    //
-    //    let output_str = output_path.to_str().unwrap();
+    let output_extension = if file.ends_with("c") || module_name.starts_with("test_") {
+        "out"
+    } else {
+        "txt"
+    };
+    output_path.set_extension(output_extension);
 
-    // Write the output to file
-    //    fs::write(output_str, output.stdout).expect("Unable to write file");
+    if wasm_file_metadata.is_none()
+        || file_metadata.modified().unwrap() >= wasm_file_metadata.unwrap().modified().unwrap()
+    {
+        eprintln!("Compiling {} to wasm...", file);
+        // Compile to wasm
+        let _wasm_compilation = Command::new("emcc")
+            .arg(file)
+            .arg("-s")
+            .arg("WASM=1")
+            .arg("-o")
+            .arg(output_js)
+            .output()
+            .expect("failed to execute process");
+
+        // panic!("{:?}", wasm_compilation);
+        if !_wasm_compilation.status.success() {
+            eprintln!("Can't compile {:?}", file);
+            eprintln!("    {}", str::from_utf8(&_wasm_compilation.stderr).expect("Can't get utf8 str").replace("\n", "\n    "));
+            return None;
+        }
+
+        eprintln!("File {} compiled to wasm.", file);
+        // Remove js file
+
+        if Path::new(output_js).is_file() {
+            fs::remove_file(output_js).unwrap();
+        } else {
+            eprintln!("Output JS not found: {}", output_js);
+        }
+
+        let mut output_exec_path = PathBuf::from(file);
+        output_exec_path.set_extension("out_exec");
+        let output_exec = output_exec_path.to_str().unwrap();
+
+        eprintln!("Compiling native executable to get real .out output");
+        // Compile to .out
+        let cc_output = Command::new("cc")
+            .arg(file)
+            .arg("-o")
+            .arg(output_exec)
+            .output()
+            .expect("failed to execute process");
+
+        if !cc_output.status.success() {
+            eprintln!("Can't execute the file to get the output. Skipping");
+            return None;
+        }
+
+        eprintln!("Native file compiled {:?}", output_exec);
+        eprintln!("Trying to get automated output");
+
+        let mut dir = PathBuf::from(file);
+        dir.pop();
+
+        // Get the result of .out
+        let output = Command::new(output_exec)
+            .current_dir(dir)
+            .output()
+            .expect("failed to execute process");
+
+        // Remove executable
+        fs::remove_file(output_exec).unwrap();
+
+        if !cc_output.status.success() {
+            eprintln!("Can't execute the file to get the output. Skipping");
+            return None;
+        }
+
+        let output_str = output_path.to_str().unwrap();
+
+        // Write the output to file
+        fs::write(output_str, output.stdout).expect("Unable to write file");
+    }
 
     let rs_module_name = module_name.to_lowercase();
     let rust_test_filepath = format!(
         concat!(env!("CARGO_MANIFEST_DIR"), "/tests/emtests/{}.rs"),
         rs_module_name.as_str()
     );
-
-    let output_extension = if file.ends_with("c") || module_name.starts_with("test_") {
-        "out"
-    } else {
-        "txt"
-    };
 
     let ignored = if ignores.contains(&module_name.to_lowercase()) {
         "\n#[ignore]"

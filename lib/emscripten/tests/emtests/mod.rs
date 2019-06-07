@@ -11,6 +11,7 @@ mod fs_exports;
 mod getvalue_setvalue;
 mod legacy_exported_runtime_numbers;
 mod localtime;
+mod lseek;
 mod modularize_closure_pre;
 mod printf;
 mod puts;

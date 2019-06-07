@@ -340,8 +340,9 @@ pub fn ___syscall140(ctx: &mut Ctx, _which: i32, mut varargs: VarArgs) -> i32 {
         *result_ptr = ret;
     }
     debug!(
-        "=> fd: {}, offset: {}, result_ptr: {}, whence: {} = {}\nlast os error: {}",
+        "=> fd: {}, ret: {}, offset: {}, result_ptr: {}, whence: {} = {}\nlast os error: {}",
         fd,
+        ret,
         offset,
         result_ptr_value,
         whence,
@@ -376,14 +377,14 @@ pub fn ___syscall145(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> i32 
             let iov_base = emscripten_memory_pointer!(ctx.memory(0), (*guest_iov_addr).iov_base)
                 as *mut c_void;
             let iov_len = (*guest_iov_addr).iov_len as _;
-            // debug!("=> iov_addr: {:?}, {:?}", iov_base, iov_len);
+            debug!("=> iov_addr: {:?}, {:?}", iov_base, iov_len);
             let curr = read(fd, iov_base, iov_len);
             if curr < 0 {
                 return -1;
             }
             ret += curr;
         }
-        // debug!(" => ret: {}", ret);
+        debug!(" => ret: {}", ret);
         ret as _
     }
 }

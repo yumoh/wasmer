@@ -7,13 +7,13 @@ endif
 
 # This will re-generate the Rust test files based on spectests/*.wast
 spectests:
-	WASMER_RUNTIME_GENERATE_SPECTESTS=1 cargo build -p wasmer-runtime-core
+	WASMER_RUNTIME_GENERATE_SPECTESTS=1 cargo build -p wasmer-runtime-core -vv
 
 emtests:
-	WASM_EMSCRIPTEN_GENERATE_EMTESTS=1 cargo build -p wasmer-emscripten
+	WASM_EMSCRIPTEN_GENERATE_EMTESTS=1 cargo build -p wasmer-emscripten -vv
 
 wasitests:
-	WASM_WASI_GENERATE_WASITESTS=1 cargo build -p wasmer-wasi
+	WASM_WASI_GENERATE_WASITESTS=1 cargo build -p wasmer-wasi -vv
 
 # clean:
 #     rm -rf artifacts
