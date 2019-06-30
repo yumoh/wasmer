@@ -1,4 +1,4 @@
-//! Wasm instance.
+//! Instantiate a module, call functions, and read exports.
 
 use crate::{
     error::{update_last_error, CApiError},
@@ -8,7 +8,7 @@ use crate::{
     value::{wasmer_value, wasmer_value_t, wasmer_value_tag},
     wasmer_result_t,
 };
-use libc::{c_char, c_int, c_void, uint32_t, uint8_t};
+use libc::{c_char, c_int, c_void};
 use std::{collections::HashMap, ffi::CStr, slice};
 use wasmer_runtime::{Ctx, Global, ImportObject, Instance, Memory, Table, Value};
 use wasmer_runtime_core::{export::Export, import::Namespace};
@@ -29,8 +29,8 @@ pub struct wasmer_instance_context_t;
 #[no_mangle]
 pub unsafe extern "C" fn wasmer_instantiate(
     instance: *mut *mut wasmer_instance_t,
-    wasm_bytes: *mut uint8_t,
-    wasm_bytes_len: uint32_t,
+    wasm_bytes: *mut u8,
+    wasm_bytes_len: u32,
     imports: *mut wasmer_import_t,
     imports_len: c_int,
 ) -> wasmer_result_t {
@@ -99,12 +99,8 @@ pub unsafe extern "C" fn wasmer_instantiate(
     let result = wasmer_runtime::instantiate(bytes, &import_object);
     let new_instance = match result {
         Ok(instance) => instance,
-        Err(_error) => {
-            // TODO the trait bound `wasmer_runtime::error::Error: std::error::Error` is not satisfied
-            //update_last_error(error);
-            update_last_error(CApiError {
-                msg: "error instantiating".to_string(),
-            });
+        Err(error) => {
+            update_last_error(error);
             return wasmer_result_t::WASMER_ERROR;
         }
     };
@@ -125,9 +121,9 @@ pub unsafe extern "C" fn wasmer_instance_call(
     instance: *mut wasmer_instance_t,
     name: *const c_char,
     params: *const wasmer_value_t,
-    params_len: c_int,
+    params_len: u32,
     results: *mut wasmer_value_t,
-    results_len: c_int,
+    results_len: u32,
 ) -> wasmer_result_t {
     if instance.is_null() {
         update_last_error(CApiError {
@@ -229,7 +225,7 @@ pub extern "C" fn wasmer_instance_context_data_set(
 #[no_mangle]
 pub extern "C" fn wasmer_instance_context_memory(
     ctx: *const wasmer_instance_context_t,
-    _memory_idx: uint32_t,
+    _memory_idx: u32,
 ) -> *const wasmer_memory_t {
     let ctx = unsafe { &*(ctx as *const Ctx) };
     let memory = ctx.memory(0);

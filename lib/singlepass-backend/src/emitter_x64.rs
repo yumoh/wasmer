@@ -89,6 +89,8 @@ pub trait Emitter {
     fn get_label(&mut self) -> Self::Label;
     fn get_offset(&mut self) -> Self::Offset;
 
+    fn emit_u64(&mut self, x: u64);
+
     fn emit_label(&mut self, label: Self::Label);
 
     fn emit_mov(&mut self, sz: Size, src: Location, dst: Location);
@@ -194,6 +196,8 @@ pub trait Emitter {
     fn emit_ret(&mut self);
     fn emit_call_label(&mut self, label: Self::Label);
     fn emit_call_location(&mut self, loc: Location);
+
+    fn emit_bkpt(&mut self);
 }
 
 macro_rules! unop_gpr {
@@ -488,6 +492,10 @@ impl Emitter for Assembler {
         self.offset()
     }
 
+    fn emit_u64(&mut self, x: u64) {
+        self.push_u64(x);
+    }
+
     fn emit_label(&mut self, label: Self::Label) {
         dynasm!(self ; => label);
     }
@@ -502,7 +510,16 @@ impl Emitter for Assembler {
                     (Size::S8, Location::Memory(src, disp), Location::GPR(dst)) => {
                         dynasm!(self ; mov Rb(dst as u8), [Rq(src as u8) + disp]);
                     }
+                    (Size::S8, Location::Imm32(src), Location::GPR(dst)) => {
+                        dynasm!(self ; mov Rb(dst as u8), src as i8);
+                    }
+                    (Size::S8, Location::Imm64(src), Location::GPR(dst)) => {
+                        dynasm!(self ; mov Rb(dst as u8), src as i8);
+                    }
                     (Size::S8, Location::Imm32(src), Location::Memory(dst, disp)) => {
+                        dynasm!(self ; mov BYTE [Rq(dst as u8) + disp], src as i8);
+                    }
+                    (Size::S8, Location::Imm64(src), Location::Memory(dst, disp)) => {
                         dynasm!(self ; mov BYTE [Rq(dst as u8) + disp], src as i8);
                     }
                     (Size::S16, Location::GPR(src), Location::Memory(dst, disp)) => {
@@ -511,8 +528,23 @@ impl Emitter for Assembler {
                     (Size::S16, Location::Memory(src, disp), Location::GPR(dst)) => {
                         dynasm!(self ; mov Rw(dst as u8), [Rq(src as u8) + disp]);
                     }
+                    (Size::S16, Location::Imm32(src), Location::GPR(dst)) => {
+                        dynasm!(self ; mov Rw(dst as u8), src as i16);
+                    }
+                    (Size::S16, Location::Imm64(src), Location::GPR(dst)) => {
+                        dynasm!(self ; mov Rw(dst as u8), src as i16);
+                    }
                     (Size::S16, Location::Imm32(src), Location::Memory(dst, disp)) => {
                         dynasm!(self ; mov WORD [Rq(dst as u8) + disp], src as i16);
+                    }
+                    (Size::S16, Location::Imm64(src), Location::Memory(dst, disp)) => {
+                        dynasm!(self ; mov WORD [Rq(dst as u8) + disp], src as i16);
+                    }
+                    (Size::S32, Location::Imm64(src), Location::GPR(dst)) => {
+                        dynasm!(self ; mov Rd(dst as u8), src as i32);
+                    }
+                    (Size::S32, Location::Imm64(src), Location::Memory(dst, disp)) => {
+                        dynasm!(self ; mov DWORD [Rq(dst as u8) + disp], src as i32);
                     }
                     (Size::S32, Location::GPR(src), Location::XMM(dst)) => {
                         dynasm!(self ; movd Rx(dst as u8), Rd(src as u8));
@@ -922,5 +954,9 @@ impl Emitter for Assembler {
             Location::Memory(base, disp) => dynasm!(self ; call QWORD [Rq(base as u8) + disp]),
             _ => unreachable!(),
         }
+    }
+
+    fn emit_bkpt(&mut self) {
+        dynasm!(self ; int 0x3);
     }
 }

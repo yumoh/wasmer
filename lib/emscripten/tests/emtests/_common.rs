@@ -4,9 +4,11 @@ macro_rules! assert_emscripten_output {
         use wasmer_emscripten::{
             EmscriptenGlobals,
             generate_emscripten_env,
-            stdio::StdioCapturer
         };
-        use wasmer_runtime_core::backend::Compiler;
+        use wasmer_runtime_core::{
+            backend::Compiler,
+        };
+        use wasmer_dev_utils::stdio::StdioCapturer;
 
         #[cfg(feature = "clif")]
         fn get_compiler() -> impl Compiler {
@@ -53,6 +55,8 @@ macro_rules! assert_emscripten_output {
             &mut instance,
             $name,
             $args,
+            None,
+            vec![],
         ).expect("run_emscripten_instance finishes");
 
         let output = capturer.end().unwrap().0;

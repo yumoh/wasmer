@@ -82,8 +82,13 @@ pub fn _raise(_ctx: &mut Ctx, _one: i32) -> i32 {
 }
 
 pub fn _sem_init(_ctx: &mut Ctx, _one: i32, _two: i32, _three: i32) -> i32 {
-    debug!("emscripten::_sem_init");
-    -1
+    debug!("emscripten::_sem_init: {}, {}, {}", _one, _two, _three);
+    0
+}
+
+pub fn _sem_destroy(_ctx: &mut Ctx, _one: i32) -> i32 {
+    debug!("emscripten::_sem_destroy");
+    0
 }
 
 pub fn _sem_post(_ctx: &mut Ctx, _one: i32) -> i32 {
@@ -126,8 +131,33 @@ pub fn _nanosleep(_ctx: &mut Ctx, _one: i32, _two: i32) -> i32 {
     -1
 }
 
+pub fn _utime(_ctx: &mut Ctx, _one: i32, _two: i32) -> i32 {
+    debug!("emscripten::_utime");
+    -1
+}
+
 pub fn _utimes(_ctx: &mut Ctx, _one: i32, _two: i32) -> i32 {
     debug!("emscripten::_utimes");
+    -1
+}
+
+pub fn _wait(_ctx: &mut Ctx, _one: i32) -> i32 {
+    debug!("emscripten::_wait");
+    -1
+}
+
+pub fn _wait3(_ctx: &mut Ctx, _one: i32, _two: i32, _three: i32) -> i32 {
+    debug!("emscripten::_wait3");
+    -1
+}
+
+pub fn _wait4(_ctx: &mut Ctx, _one: i32, _two: i32, _three: i32, _d: i32) -> i32 {
+    debug!("emscripten::_wait4");
+    -1
+}
+
+pub fn _waitid(_ctx: &mut Ctx, _one: i32, _two: i32, _three: i32, _d: i32) -> i32 {
+    debug!("emscripten::_waitid");
     -1
 }
 
@@ -159,7 +189,7 @@ pub fn _system(_ctx: &mut Ctx, _one: i32) -> c_int {
     debug!("emscripten::_system");
     // TODO: May need to change this Em impl to a working version
     eprintln!("Can't call external programs");
-    return EAGAIN;
+    EAGAIN
 }
 
 pub fn _popen(_ctx: &mut Ctx, _one: i32, _two: i32) -> c_int {

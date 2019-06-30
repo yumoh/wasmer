@@ -1,30 +1,60 @@
-pub use crate::backing::{ImportBacking, LocalBacking};
+pub use crate::backing::{ImportBacking, LocalBacking, INTERNALS_SIZE};
 use crate::{
-    memory::Memory,
-    module::ModuleInner,
+    memory::{Memory, MemoryType},
+    module::{ModuleInfo, ModuleInner},
     structures::TypedIndex,
     types::{LocalOrImport, MemoryIndex},
+    vmcalls,
 };
-use std::{ffi::c_void, mem, ptr};
+use std::{
+    cell::UnsafeCell,
+    ffi::c_void,
+    mem, ptr,
+    sync::atomic::{AtomicUsize, Ordering},
+    sync::Once,
+};
 
 use hashbrown::HashMap;
 
 /// The context of the currently running WebAssembly instance.
 ///
+/// This is implicitly passed to every WebAssembly function.
+/// Since this is per-instance, each field has a statically
+/// (as in after compiling the wasm) known size, so no
+/// runtime checks are necessary.
 ///
+/// While the runtime currently just passes this around
+/// as the first, implicit parameter of every function,
+/// it may someday be pinned to a register (especially
+/// on arm, which has a ton of registers) to reduce
+/// register shuffling.
 #[derive(Debug)]
 #[repr(C)]
 pub struct Ctx {
     // `internal` must be the first field of `Ctx`.
-    pub(crate) internal: InternalCtx,
+    pub internal: InternalCtx,
 
     pub(crate) local_functions: *const *const Func,
 
+    /// These are pointers to things that are known to be owned
+    /// by the owning `Instance`.
     local_backing: *mut LocalBacking,
     import_backing: *mut ImportBacking,
-    module: *const ModuleInner,
+    pub module: *const ModuleInner,
 
+    //// This is intended to be user-supplied, per-instance
+    /// contextual data. There are currently some issue with it,
+    /// notably that it cannot be set before running the `start`
+    /// function in a WebAssembly module.
+    ///
+    /// [#219](https://github.com/wasmerio/wasmer/pull/219) fixes that
+    /// issue, as well as allowing the user to have *per-function*
+    /// context, instead of just per-instance.
     pub data: *mut c_void,
+
+    /// If there's a function set in this field, it gets called
+    /// when the context is destructed, e.g. when an `Instance`
+    /// is dropped.
     pub data_finalizer: Option<fn(data: *mut c_void)>,
 }
 
@@ -61,6 +91,120 @@ pub struct InternalCtx {
     /// signature id. This is used to allow call-indirect to other
     /// modules safely.
     pub dynamic_sigindices: *const SigId,
+
+    pub intrinsics: *const Intrinsics,
+
+    pub stack_lower_bound: *mut u8,
+
+    pub memory_base: *mut u8,
+    pub memory_bound: usize,
+
+    pub internals: *mut [u64; INTERNALS_SIZE], // TODO: Make this dynamic?
+}
+
+static INTERNAL_FIELDS: AtomicUsize = AtomicUsize::new(0);
+
+pub struct InternalField {
+    init: Once,
+    inner: UnsafeCell<usize>,
+}
+
+unsafe impl Send for InternalField {}
+unsafe impl Sync for InternalField {}
+
+impl InternalField {
+    pub const fn allocate() -> InternalField {
+        InternalField {
+            init: Once::new(),
+            inner: UnsafeCell::new(::std::usize::MAX),
+        }
+    }
+
+    pub fn index(&self) -> usize {
+        let inner: *mut usize = self.inner.get();
+        self.init.call_once(|| {
+            let idx = INTERNAL_FIELDS.fetch_add(1, Ordering::SeqCst);
+            if idx >= INTERNALS_SIZE {
+                INTERNAL_FIELDS.fetch_sub(1, Ordering::SeqCst);
+                panic!("at most {} internal fields are supported", INTERNALS_SIZE);
+            } else {
+                unsafe {
+                    *inner = idx;
+                }
+            }
+        });
+        unsafe { *inner }
+    }
+}
+
+#[repr(C)]
+pub struct Intrinsics {
+    pub memory_grow: *const Func,
+    pub memory_size: *const Func,
+    /*pub memory_grow: unsafe extern "C" fn(
+        ctx: &mut Ctx,
+        memory_index: usize,
+        delta: Pages,
+    ) -> i32,
+    pub memory_size: unsafe extern "C" fn(
+        ctx: &Ctx,
+        memory_index: usize,
+    ) -> Pages,*/
+}
+
+unsafe impl Send for Intrinsics {}
+unsafe impl Sync for Intrinsics {}
+
+impl Intrinsics {
+    #[allow(clippy::erasing_op)]
+    pub fn offset_memory_grow() -> u8 {
+        (0 * ::std::mem::size_of::<usize>()) as u8
+    }
+    pub fn offset_memory_size() -> u8 {
+        (1 * ::std::mem::size_of::<usize>()) as u8
+    }
+}
+
+pub static INTRINSICS_LOCAL_STATIC_MEMORY: Intrinsics = Intrinsics {
+    memory_grow: vmcalls::local_static_memory_grow as _,
+    memory_size: vmcalls::local_static_memory_size as _,
+};
+pub static INTRINSICS_LOCAL_DYNAMIC_MEMORY: Intrinsics = Intrinsics {
+    memory_grow: vmcalls::local_dynamic_memory_grow as _,
+    memory_size: vmcalls::local_dynamic_memory_size as _,
+};
+pub static INTRINSICS_IMPORTED_STATIC_MEMORY: Intrinsics = Intrinsics {
+    memory_grow: vmcalls::imported_static_memory_grow as _,
+    memory_size: vmcalls::imported_static_memory_size as _,
+};
+pub static INTRINSICS_IMPORTED_DYNAMIC_MEMORY: Intrinsics = Intrinsics {
+    memory_grow: vmcalls::imported_dynamic_memory_grow as _,
+    memory_size: vmcalls::imported_dynamic_memory_size as _,
+};
+
+fn get_intrinsics_for_module(m: &ModuleInfo) -> *const Intrinsics {
+    if m.memories.len() == 0 && m.imported_memories.len() == 0 {
+        ::std::ptr::null()
+    } else {
+        match MemoryIndex::new(0).local_or_import(m) {
+            LocalOrImport::Local(local_mem_index) => {
+                let mem_desc = &m.memories[local_mem_index];
+                match mem_desc.memory_type() {
+                    MemoryType::Dynamic => &INTRINSICS_LOCAL_DYNAMIC_MEMORY,
+                    MemoryType::Static => &INTRINSICS_LOCAL_STATIC_MEMORY,
+                    MemoryType::SharedStatic => unimplemented!(),
+                }
+            }
+            LocalOrImport::Import(import_mem_index) => {
+                let mem_desc = &m.imported_memories[import_mem_index].1;
+                match mem_desc.memory_type() {
+                    MemoryType::Dynamic => &INTRINSICS_IMPORTED_DYNAMIC_MEMORY,
+                    MemoryType::Static => &INTRINSICS_IMPORTED_STATIC_MEMORY,
+                    MemoryType::SharedStatic => unimplemented!(),
+                }
+            }
+        }
+    }
 }
 
 impl Ctx {
@@ -70,6 +214,16 @@ impl Ctx {
         import_backing: &mut ImportBacking,
         module: &ModuleInner,
     ) -> Self {
+        let (mem_base, mem_bound): (*mut u8, usize) =
+            if module.info.memories.len() == 0 && module.info.imported_memories.len() == 0 {
+                (::std::ptr::null_mut(), 0)
+            } else {
+                let mem = match MemoryIndex::new(0).local_or_import(&module.info) {
+                    LocalOrImport::Local(index) => local_backing.vm_memories[index],
+                    LocalOrImport::Import(index) => import_backing.vm_memories[index],
+                };
+                ((*mem).base, (*mem).bound)
+            };
         Self {
             internal: InternalCtx {
                 memories: local_backing.vm_memories.as_mut_ptr(),
@@ -82,6 +236,15 @@ impl Ctx {
                 imported_funcs: import_backing.vm_functions.as_mut_ptr(),
 
                 dynamic_sigindices: local_backing.dynamic_sigindices.as_ptr(),
+
+                intrinsics: get_intrinsics_for_module(&module.info),
+
+                stack_lower_bound: ::std::ptr::null_mut(),
+
+                memory_base: mem_base,
+                memory_bound: mem_bound,
+
+                internals: &mut local_backing.internals.0,
             },
             local_functions: local_backing.local_functions.as_ptr(),
 
@@ -102,6 +265,16 @@ impl Ctx {
         data: *mut c_void,
         data_finalizer: fn(*mut c_void),
     ) -> Self {
+        let (mem_base, mem_bound): (*mut u8, usize) =
+            if module.info.memories.len() == 0 && module.info.imported_memories.len() == 0 {
+                (::std::ptr::null_mut(), 0)
+            } else {
+                let mem = match MemoryIndex::new(0).local_or_import(&module.info) {
+                    LocalOrImport::Local(index) => local_backing.vm_memories[index],
+                    LocalOrImport::Import(index) => import_backing.vm_memories[index],
+                };
+                ((*mem).base, (*mem).bound)
+            };
         Self {
             internal: InternalCtx {
                 memories: local_backing.vm_memories.as_mut_ptr(),
@@ -114,6 +287,15 @@ impl Ctx {
                 imported_funcs: import_backing.vm_functions.as_mut_ptr(),
 
                 dynamic_sigindices: local_backing.dynamic_sigindices.as_ptr(),
+
+                intrinsics: get_intrinsics_for_module(&module.info),
+
+                stack_lower_bound: ::std::ptr::null_mut(),
+
+                memory_base: mem_base,
+                memory_bound: mem_bound,
+
+                internals: &mut local_backing.internals.0,
             },
             local_functions: local_backing.local_functions.as_ptr(),
 
@@ -163,6 +345,23 @@ impl Ctx {
     pub unsafe fn borrow_symbol_map(&self) -> &Option<HashMap<u32, String>> {
         &(*self.module).info.em_symbol_map
     }
+
+    /// Returns the number of dynamic sigindices.
+    pub fn dynamic_sigindice_count(&self) -> usize {
+        unsafe { (*self.local_backing).dynamic_sigindices.len() }
+    }
+
+    /// Returns the value of the specified internal field.
+    pub fn get_internal(&self, field: &InternalField) -> u64 {
+        unsafe { (*self.internal.internals)[field.index()] }
+    }
+
+    /// Writes the value to the specified internal field.
+    pub fn set_internal(&mut self, field: &InternalField, value: u64) {
+        unsafe {
+            (*self.internal.internals)[field.index()] = value;
+        }
+    }
 }
 
 #[doc(hidden)]
@@ -200,8 +399,28 @@ impl Ctx {
         7 * (mem::size_of::<usize>() as u8)
     }
 
-    pub fn offset_local_functions() -> u8 {
+    pub fn offset_intrinsics() -> u8 {
         8 * (mem::size_of::<usize>() as u8)
+    }
+
+    pub fn offset_stack_lower_bound() -> u8 {
+        9 * (mem::size_of::<usize>() as u8)
+    }
+
+    pub fn offset_memory_base() -> u8 {
+        10 * (mem::size_of::<usize>() as u8)
+    }
+
+    pub fn offset_memory_bound() -> u8 {
+        11 * (mem::size_of::<usize>() as u8)
+    }
+
+    pub fn offset_internals() -> u8 {
+        12 * (mem::size_of::<usize>() as u8)
+    }
+
+    pub fn offset_local_functions() -> u8 {
+        13 * (mem::size_of::<usize>() as u8)
     }
 }
 
@@ -397,6 +616,31 @@ mod vm_offset_tests {
         );
 
         assert_eq!(
+            Ctx::offset_intrinsics() as usize,
+            offset_of!(InternalCtx => intrinsics).get_byte_offset(),
+        );
+
+        assert_eq!(
+            Ctx::offset_stack_lower_bound() as usize,
+            offset_of!(InternalCtx => stack_lower_bound).get_byte_offset(),
+        );
+
+        assert_eq!(
+            Ctx::offset_memory_base() as usize,
+            offset_of!(InternalCtx => memory_base).get_byte_offset(),
+        );
+
+        assert_eq!(
+            Ctx::offset_memory_bound() as usize,
+            offset_of!(InternalCtx => memory_bound).get_byte_offset(),
+        );
+
+        assert_eq!(
+            Ctx::offset_internals() as usize,
+            offset_of!(InternalCtx => internals).get_byte_offset(),
+        );
+
+        assert_eq!(
             Ctx::offset_local_functions() as usize,
             offset_of!(Ctx => local_functions).get_byte_offset(),
         );
@@ -508,6 +752,8 @@ mod vm_ctx_tests {
 
             dynamic_sigindices: Map::new().into_boxed_map(),
             local_functions: Map::new().into_boxed_map(),
+
+            internals: crate::backing::Internals([0; crate::backing::INTERNALS_SIZE]),
         };
         let mut import_backing = ImportBacking {
             memories: Map::new().into_boxed_map(),
@@ -544,60 +790,38 @@ mod vm_ctx_tests {
 
     fn generate_module() -> ModuleInner {
         use super::Func;
-        use crate::backend::{
-            sys::Memory, Backend, CacheGen, FuncResolver, ProtectedCaller, Token, UserTrapper,
-        };
+        use crate::backend::{sys::Memory, Backend, CacheGen, RunnableModule};
         use crate::cache::Error as CacheError;
-        use crate::error::RuntimeResult;
         use crate::typed_func::Wasm;
-        use crate::types::{FuncIndex, LocalFuncIndex, SigIndex, Value};
+        use crate::types::{LocalFuncIndex, SigIndex};
         use hashbrown::HashMap;
+        use std::any::Any;
         use std::ptr::NonNull;
         struct Placeholder;
-        impl FuncResolver for Placeholder {
-            fn get(
+        impl RunnableModule for Placeholder {
+            fn get_func(
                 &self,
-                _module: &ModuleInner,
+                _module: &ModuleInfo,
                 _local_func_index: LocalFuncIndex,
             ) -> Option<NonNull<Func>> {
                 None
             }
-        }
-        impl ProtectedCaller for Placeholder {
-            fn call(
-                &self,
-                _module: &ModuleInner,
-                _func_index: FuncIndex,
-                _params: &[Value],
-                _import_backing: &ImportBacking,
-                _vmctx: *mut Ctx,
-                _: Token,
-            ) -> RuntimeResult<Vec<Value>> {
-                Ok(vec![])
-            }
-            fn get_wasm_trampoline(
-                &self,
-                _module: &ModuleInner,
-                _sig_index: SigIndex,
-            ) -> Option<Wasm> {
+
+            fn get_trampoline(&self, _module: &ModuleInfo, _sig_index: SigIndex) -> Option<Wasm> {
                 unimplemented!()
             }
-            fn get_early_trapper(&self) -> Box<dyn UserTrapper> {
+            unsafe fn do_early_trap(&self, _: Box<dyn Any>) -> ! {
                 unimplemented!()
             }
         }
         impl CacheGen for Placeholder {
-            fn generate_cache(
-                &self,
-                module: &ModuleInner,
-            ) -> Result<(Box<ModuleInfo>, Box<[u8]>, Memory), CacheError> {
+            fn generate_cache(&self) -> Result<(Box<[u8]>, Memory), CacheError> {
                 unimplemented!()
             }
         }
 
         ModuleInner {
-            func_resolver: Box::new(Placeholder),
-            protected_caller: Box::new(Placeholder),
+            runnable_module: Box::new(Placeholder),
             cache_gen: Box::new(Placeholder),
             info: ModuleInfo {
                 memories: Map::new(),

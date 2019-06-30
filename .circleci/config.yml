@@ -12,6 +12,14 @@ run_install_dependencies: &run_install_dependencies
 
 version: 2
 jobs:
+  changelog:
+    docker:
+      - image: docker:stable-git
+    steps:
+      - checkout
+      - run:
+          command: ! git diff --exit-code CHANGELOG.md
+
   # Job used for testing
   lint:
     docker:
@@ -22,15 +30,14 @@ jobs:
       - restore_cache:
           keys:
             - v8-lint-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-lint-{{ arch }}
       - <<: *run_install_dependencies
       - run:
           name: Install lint deps
           command: |
             git config --global --unset url."ssh://git@github.com".insteadOf || true
-            rustup toolchain install nightly-2019-02-27
+            rustup toolchain install nightly-2019-05-20
             rustup component add rustfmt
-            rustup component add clippy --toolchain=nightly-2019-02-27 || cargo +nightly-2019-02-27 install --git https://github.com/rust-lang/rust-clippy/ --force clippy
+            rustup component add clippy --toolchain=nightly-2019-05-20 || cargo +nightly-2019-05-20 install --git https://github.com/rust-lang/rust-clippy/ --force clippy
       - run:
           name: Execute lints
           command: |
@@ -52,7 +59,6 @@ jobs:
       - restore_cache:
           keys:
             - v8-test-cargo-cache-linux-stable-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-test-cargo-cache-linux-stable-{{ arch }}
       - <<: *run_install_dependencies
       - run:
           name: Tests
@@ -81,7 +87,6 @@ jobs:
       - restore_cache:
           keys:
             - v8-cargo-cache-darwin-stable-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-cargo-cache-darwin-stable-{{ arch }}
       - run:
           name: Install crate dependencies
           command: |
@@ -95,7 +100,7 @@ jobs:
       - run:
           name: Install Rust
           command: |
-            curl https://sh.rustup.rs -sSf | sh -s -- -y
+            curl -sSf https://sh.rustup.rs | sh -s -- -y
             export PATH="$HOME/.cargo/bin:$PATH"
             cargo --version
       - run:
@@ -142,10 +147,14 @@ jobs:
       - image: circleci/rust:latest
     steps:
       - checkout
+      - run:
+          name: "Pull dependencies"
+          command: |
+            git submodule init
+            git submodule update
       - restore_cache:
           keys:
             - v8-cargo-cache-linux-nightly-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-cargo-cache-linux-nightly-{{ arch }}
       - run:
           name: Install dependencies
           command: |
@@ -166,10 +175,15 @@ jobs:
             make test-emscripten-clif
             make test-emscripten-llvm
       - run:
+          name: Debug flag checked
+          command: |
+            cargo check --features "debug"
+      - run:
           name: Release Build
           command: |
             export LLVM_SYS_70_PREFIX="`pwd`/clang+llvm-7.0.0-x86_64-linux-gnu-ubuntu-16.04/"
             make production-release
+            cargo build --release --manifest-path wapm-cli/Cargo.toml --features telemetry
             mkdir -p artifacts
             VERSION=$(cargo pkgid | cut -d# -f2 | cut -d: -f2)
             # GIT_VERSION=$(git describe --exact-match --tags)
@@ -178,9 +192,10 @@ jobs:
             make build-install
             cp ./wasmer.tar.gz ./artifacts/$(./binary-name.sh)
       - run:
-          name: Debug flag checked
+          name: Dynamic library
           command: |
-            cargo check --features "debug"
+            cargo build --release --manifest-path lib/runtime-c-api/Cargo.toml
+            cp target/release/libwasmer_runtime_c_api.so ./artifacts
       - persist_to_workspace:
           root: .
           paths:
@@ -194,6 +209,9 @@ jobs:
             - target/release/.fingerprint
             - target/release/build
             - target/release/deps
+            - wapm-cli/target/release/.fingerprint
+            - wapm-cli/target/release/build
+            - wapm-cli/target/release/deps
           key: v8-cargo-cache-linux-nightly-{{ arch }}-{{ checksum "Cargo.lock" }}
 
   test-and-build-macos:
@@ -201,10 +219,14 @@ jobs:
       xcode: "9.0"
     steps:
       - checkout
+      - run:
+          name: "Pull dependencies"
+          command: |
+            git submodule init
+            git submodule update
       - restore_cache:
           keys:
             - v8-cargo-cache-darwin-nightly-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-cargo-cache-darwin-nightly-{{ arch }}
       - run:
           name: Install crate dependencies
           command: |
@@ -218,7 +240,7 @@ jobs:
       - run:
           name: Install Rust
           command: |
-            curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain nightly-2019-04-11
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly
             export PATH="$HOME/.cargo/bin:$PATH"
             cargo --version
       # Use rust nightly (for singlepass, for now)
@@ -255,11 +277,19 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
             export LLVM_SYS_70_PREFIX="`pwd`/clang+llvm-7.0.0-x86_64-apple-darwin/"
             make production-release
+            cargo build --release --manifest-path wapm-cli/Cargo.toml --features telemetry
             mkdir -p artifacts
             make build-install
             cp ./wasmer.tar.gz ./artifacts/$(./binary-name.sh)
             # VERSION=$(cargo pkgid | cut -d# -f2 | cut -d: -f2)
             # echo "${VERSION}" >> artifacts/version
+      - run:
+          name: Generate dynamic library for the runtime C API
+          command: |
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo build --release --manifest-path lib/runtime-c-api/Cargo.toml
+            install_name_tool -id "@rpath/libwasmer_runtime_c_api.dylib" target/release/libwasmer_runtime_c_api.dylib
+            cp target/release/libwasmer_runtime_c_api.dylib ./artifacts
       - persist_to_workspace:
           root: .
           paths:
@@ -273,6 +303,9 @@ jobs:
             - target/release/.fingerprint
             - target/release/build
             - target/release/deps
+            - wapm-cli/target/release/.fingerprint
+            - wapm-cli/target/release/build
+            - wapm-cli/target/release/deps
           key: v8-cargo-cache-darwin-nightly-{ arch }}-{{ checksum "Cargo.lock" }}
 
   test-rust-nightly:
@@ -283,13 +316,18 @@ jobs:
       - restore_cache:
           keys:
             - v8-cargo-cache-linux-nightly-{{ arch }}-{{ checksum "Cargo.lock" }}
-            - v8-cargo-cache-linux-nightly-{{ arch }}
       - run:
           name: Install dependencies
           command: |
             sudo apt-get install -y cmake
             curl -O https://releases.llvm.org/7.0.0/clang+llvm-7.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
             tar xf clang+llvm-7.0.0-x86_64-linux-gnu-ubuntu-16.04.tar.xz
+            rustup toolchain install nightly
+            rustup target add wasm32-wasi --toolchain nightly
+      - run: |
+          rustup default nightly
+          make test-wasi-singlepass
+          make test-wasi-clif
       - run: rustup default nightly-2019-04-11
       - run: |
           export LLVM_SYS_70_PREFIX="`pwd`/clang+llvm-7.0.0-x86_64-linux-gnu-ubuntu-16.04/"
@@ -325,7 +363,7 @@ jobs:
             # VERSION_TAG=$(git describe --exact-match --tags)
             #if [ "$VERSION" == "$VERSION_TAG" ]; then
             # echo "Versions match, publishing to Github"
-            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -soft ${VERSION} ./artifacts/
+            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} ${VERSION} ./artifacts/  || true
             #else
             #    echo "Versions don't match. Wasmer output version (wasmer --version) is ${VERSION} while Git tag is ${VERSION_TAG}"
             #    exit 1
@@ -346,11 +384,11 @@ jobs:
                     -d build_parameters[CIRCLE_JOB]=bench \
                     https://circleci.com/api/v1.1/project/github/wasmerio/wasmer-bench/tree/master
             fi
-
 workflows:
   version: 2
   main:
     jobs:
+      - changelog
       - lint
       - test:
           filters:

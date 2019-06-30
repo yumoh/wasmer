@@ -12,6 +12,9 @@ spectests:
 emtests:
 	WASM_EMSCRIPTEN_GENERATE_EMTESTS=1 cargo build -p wasmer-emscripten
 
+wasitests:
+	WASM_WASI_GENERATE_WASITESTS=1 cargo build -p wasmer-wasi
+
 # clean:
 #     rm -rf artifacts
 
@@ -25,17 +28,19 @@ integration-tests: release
 	echo "Running Integration Tests"
 	./integration_tests/lua/test.sh
 	./integration_tests/nginx/test.sh
+	./integration_tests/cowsay/test.sh
 
 lint:
 	cargo fmt --all -- --check
-	cargo +nightly-2019-02-27 clippy --all
+	cargo +nightly-2019-05-20 clippy --all
 
 precommit: lint test
 
 build-install:
 	mkdir -p ./install/bin
+	cp ./wapm-cli/target/release/wapm ./install/bin/
 	cp ./target/release/wasmer ./install/bin/
-	tar -C ./install -zcvf wasmer.tar.gz bin/wasmer
+	tar -C ./install -zcvf wasmer.tar.gz bin/wapm bin/wasmer
 
 # For installing the contents locally
 do-install:
@@ -43,15 +48,21 @@ do-install:
 
 test:
 	# We use one thread so the emscripten stdouts doesn't collide
-	cargo test --all --exclude wasmer-runtime-c-api --exclude wasmer-emscripten --exclude wasmer-spectests --exclude wasmer-singlepass-backend -- $(runargs)
+	cargo test --all --exclude wasmer-runtime-c-api --exclude wasmer-emscripten --exclude wasmer-spectests --exclude wasmer-singlepass-backend --exclude wasmer-wasi --exclude wasmer-middleware-common -- $(runargs)
 	# cargo test --all --exclude wasmer-emscripten -- --test-threads=1 $(runargs)
 	cargo test --manifest-path lib/spectests/Cargo.toml --features clif
+	cargo test --manifest-path lib/middleware-common/Cargo.toml --features clif
+	@if [ ! -z "${CIRCLE_JOB}" ]; then rm -f /home/circleci/project/target/debug/deps/libcranelift_wasm* && rm -f /Users/distiller/project/target/debug/deps/libcranelift_wasm*; fi;
 	cargo test --manifest-path lib/spectests/Cargo.toml --features llvm
+	cargo test --manifest-path lib/runtime/Cargo.toml --features llvm
+	cargo test --manifest-path lib/middleware-common/Cargo.toml --features llvm
 	cargo build -p wasmer-runtime-c-api
 	cargo test -p wasmer-runtime-c-api -- --nocapture
 
 test-singlepass:
 	cargo test --manifest-path lib/spectests/Cargo.toml --features singlepass
+	cargo test --manifest-path lib/runtime/Cargo.toml --features singlepass
+	cargo test --manifest-path lib/middleware-common/Cargo.toml --features singlepass
 
 test-emscripten-llvm:
 	cargo test --manifest-path lib/emscripten/Cargo.toml --features llvm -- --test-threads=1 $(runargs)
@@ -62,14 +73,20 @@ test-emscripten-clif:
 test-emscripten-singlepass:
 	cargo test --manifest-path lib/emscripten/Cargo.toml --features singlepass -- --test-threads=1 $(runargs)
 
+test-wasi-clif:
+	cargo test --manifest-path lib/wasi/Cargo.toml --features "clif" -- --test-threads=1 $(runargs)
+
+test-wasi-singlepass:
+	cargo test --manifest-path lib/wasi/Cargo.toml --features "singlepass" -- --test-threads=1 $(runargs)
+
 singlepass-debug-release:
-	cargo +nightly build --features "singlepass debug" --release
+	cargo +nightly build --features backend:singlepass,debug --release
 
 singlepass-release:
-	cargo +nightly build --features "singlepass" --release
+	cargo +nightly build --features backend:singlepass --release
 
 singlepass-build:
-	cargo +nightly build --features "singlepass debug"
+	cargo +nightly build --features backend:singlepass,debug
 
 release:
 	# If you are in OS-X, you will need mingw-w64 for cross compiling to windows
@@ -77,10 +94,18 @@ release:
 	cargo build --release
 
 production-release:
-	cargo build --release --features backend:singlepass,backend:llvm
+	cargo build --release --features backend:singlepass,backend:llvm,loader:kernel
 
 debug-release:
-	cargo build --release --features "debug"
+	cargo build --release --features debug
+
+extra-debug-release:
+	cargo build --release --features extra-debug
 
 publish-release:
 	ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${VERSION} ./artifacts/
+
+# cargo install cargo-deps
+# must install graphviz for `dot`
+dep-graph:
+	cargo deps --optional-deps --filter wasmer-wasi wasmer-kernel-loader wasmer-dev-utils wasmer-llvm-backend wasmer-emscripten wasmer-runtime-core wasmer-runtime wasmer-middleware-common wasmer-singlepass-backend wasmer-clif-backend wasmer --manifest-path Cargo.toml | dot -Tpng > wasmer_depgraph.png

@@ -1,3 +1,5 @@
+#![deny(unused_imports, unused_variables, unused_unsafe, unreachable_patterns)]
+
 //! Wasmer-runtime is a library that makes embedding WebAssembly
 //! in your application easy, efficient, and safe.
 //!
@@ -74,6 +76,7 @@
 //! [`wasmer-clif-backend`]: https://crates.io/crates/wasmer-clif-backend
 //! [`compile_with`]: fn.compile_with.html
 
+pub use wasmer_runtime_core::codegen::{MiddlewareChain, StreamingCompiler};
 pub use wasmer_runtime_core::export::Export;
 pub use wasmer_runtime_core::global::Global;
 pub use wasmer_runtime_core::import::ImportObject;
@@ -129,7 +132,7 @@ use wasmer_runtime_core::backend::{Compiler, CompilerConfig};
 /// # Errors:
 /// If the operation fails, the function returns `Err(error::CompileError::...)`.
 pub fn compile(wasm: &[u8]) -> error::CompileResult<Module> {
-    wasmer_runtime_core::compile_with(&wasm[..], default_compiler())
+    wasmer_runtime_core::compile_with(&wasm[..], &default_compiler())
 }
 
 /// The same as `compile` but takes a `CompilerConfig` for the purpose of
@@ -138,7 +141,7 @@ pub fn compile_with_config(
     wasm: &[u8],
     compiler_config: CompilerConfig,
 ) -> error::CompileResult<Module> {
-    wasmer_runtime_core::compile_with_config(&wasm[..], default_compiler(), compiler_config)
+    wasmer_runtime_core::compile_with_config(&wasm[..], &default_compiler(), compiler_config)
 }
 
 /// The same as `compile_with_config` but takes a `Compiler` for the purpose of
@@ -175,9 +178,7 @@ pub fn instantiate(wasm: &[u8], import_object: &ImportObject) -> error::Result<I
 }
 
 /// Get a single instance of the default compiler to use.
-pub fn default_compiler() -> &'static dyn Compiler {
-    use lazy_static::lazy_static;
-
+pub fn default_compiler() -> impl Compiler {
     #[cfg(feature = "llvm")]
     use wasmer_llvm_backend::LLVMCompiler as DefaultCompiler;
 
@@ -187,11 +188,7 @@ pub fn default_compiler() -> &'static dyn Compiler {
     #[cfg(not(any(feature = "llvm", feature = "singlepass")))]
     use wasmer_clif_backend::CraneliftCompiler as DefaultCompiler;
 
-    lazy_static! {
-        static ref DEFAULT_COMPILER: DefaultCompiler = { DefaultCompiler::new() };
-    }
-
-    &*DEFAULT_COMPILER as &dyn Compiler
+    DefaultCompiler::new()
 }
 
 /// The current version of this crate

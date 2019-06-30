@@ -13,20 +13,22 @@ use std::{
     any::Any,
     ffi::{c_void, CString},
     mem,
+    ops::Deref,
     ptr::{self, NonNull},
     slice, str,
-    sync::Once,
+    sync::{Arc, Once},
 };
 use wasmer_runtime_core::{
-    backend::{FuncResolver, ProtectedCaller, Token, UserTrapper},
-    error::{RuntimeError, RuntimeResult},
-    export::Context,
-    module::{ModuleInfo, ModuleInner},
+    backend::{
+        sys::{Memory, Protect},
+        CacheGen, RunnableModule,
+    },
+    cache::Error as CacheError,
+    module::ModuleInfo,
     structures::TypedIndex,
     typed_func::{Wasm, WasmTrapInfo},
-    types::{FuncIndex, FuncSig, LocalFuncIndex, LocalOrImport, SigIndex, Type, Value},
-    vm::{self, ImportBacking},
-    vmcalls,
+    types::{LocalFuncIndex, SigIndex},
+    vm, vmcalls,
 };
 
 #[repr(C)]
@@ -91,6 +93,7 @@ extern "C" {
         params: *const u64,
         results: *mut u64,
         trap_out: *mut WasmTrapInfo,
+        user_error: *mut Option<Box<dyn Any>>,
         invoke_env: Option<NonNull<c_void>>,
     ) -> bool;
 }
@@ -206,17 +209,32 @@ fn get_callbacks() -> Callbacks {
     }
 }
 
+pub enum Buffer {
+    LlvmMemory(MemoryBuffer),
+    Memory(Memory),
+}
+
+impl Deref for Buffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match self {
+            Buffer::LlvmMemory(mem_buffer) => mem_buffer.as_slice(),
+            Buffer::Memory(memory) => unsafe { memory.as_slice() },
+        }
+    }
+}
+
 unsafe impl Send for LLVMBackend {}
 unsafe impl Sync for LLVMBackend {}
 
 pub struct LLVMBackend {
     module: *mut LLVMModule,
     #[allow(dead_code)]
-    memory_buffer: MemoryBuffer,
+    buffer: Arc<Buffer>,
 }
 
 impl LLVMBackend {
-    pub fn new(module: Module, _intrinsics: Intrinsics) -> (Self, LLVMProtectedCaller) {
+    pub fn new(module: Module, _intrinsics: Intrinsics) -> (Self, LLVMCache) {
         Target::initialize_x86(&InitializationConfig {
             asm_parser: true,
             asm_printer: true,
@@ -265,16 +283,55 @@ impl LLVMBackend {
             panic!("failed to load object")
         }
 
+        let buffer = Arc::new(Buffer::LlvmMemory(memory_buffer));
+
         (
             Self {
                 module,
-                memory_buffer,
+                buffer: Arc::clone(&buffer),
             },
-            LLVMProtectedCaller { module },
+            LLVMCache { buffer },
         )
     }
 
-    pub fn get_func(
+    pub unsafe fn from_buffer(memory: Memory) -> Result<(Self, LLVMCache), String> {
+        let callbacks = get_callbacks();
+        let mut module: *mut LLVMModule = ptr::null_mut();
+
+        let slice = memory.as_slice();
+
+        let res = module_load(slice.as_ptr(), slice.len(), callbacks, &mut module);
+
+        if res != LLVMResult::OK {
+            return Err("failed to load object".to_string());
+        }
+
+        static SIGNAL_HANDLER_INSTALLED: Once = Once::new();
+
+        SIGNAL_HANDLER_INSTALLED.call_once(|| {
+            crate::platform::install_signal_handler();
+        });
+
+        let buffer = Arc::new(Buffer::Memory(memory));
+
+        Ok((
+            Self {
+                module,
+                buffer: Arc::clone(&buffer),
+            },
+            LLVMCache { buffer },
+        ))
+    }
+}
+
+impl Drop for LLVMBackend {
+    fn drop(&mut self) {
+        unsafe { module_delete(self.module) }
+    }
+}
+
+impl RunnableModule for LLVMBackend {
+    fn get_func(
         &self,
         info: &ModuleInfo,
         local_func_index: LocalFuncIndex,
@@ -291,126 +348,8 @@ impl LLVMBackend {
 
         NonNull::new(ptr as _)
     }
-}
 
-impl Drop for LLVMBackend {
-    fn drop(&mut self) {
-        unsafe { module_delete(self.module) }
-    }
-}
-
-impl FuncResolver for LLVMBackend {
-    fn get(
-        &self,
-        module: &ModuleInner,
-        local_func_index: LocalFuncIndex,
-    ) -> Option<NonNull<vm::Func>> {
-        self.get_func(&module.info, local_func_index)
-    }
-}
-
-struct Placeholder;
-
-unsafe impl Send for LLVMProtectedCaller {}
-unsafe impl Sync for LLVMProtectedCaller {}
-
-pub struct LLVMProtectedCaller {
-    module: *mut LLVMModule,
-}
-
-impl ProtectedCaller for LLVMProtectedCaller {
-    fn call(
-        &self,
-        module: &ModuleInner,
-        func_index: FuncIndex,
-        params: &[Value],
-        import_backing: &ImportBacking,
-        vmctx: *mut vm::Ctx,
-        _: Token,
-    ) -> RuntimeResult<Vec<Value>> {
-        let (func_ptr, ctx, signature, sig_index) =
-            get_func_from_index(&module, import_backing, func_index);
-
-        let vmctx_ptr = match ctx {
-            Context::External(external_vmctx) => external_vmctx,
-            Context::Internal => vmctx,
-        };
-
-        assert!(
-            signature.returns().len() <= 1,
-            "multi-value returns not yet supported"
-        );
-
-        assert!(
-            signature.check_param_value_types(params),
-            "incorrect signature"
-        );
-
-        let param_vec: Vec<u64> = params
-            .iter()
-            .map(|val| match val {
-                Value::I32(x) => *x as u64,
-                Value::I64(x) => *x as u64,
-                Value::F32(x) => x.to_bits() as u64,
-                Value::F64(x) => x.to_bits(),
-            })
-            .collect();
-
-        let mut return_vec = vec![0; signature.returns().len()];
-
-        let trampoline: unsafe extern "C" fn(
-            *mut vm::Ctx,
-            NonNull<vm::Func>,
-            *const u64,
-            *mut u64,
-        ) = unsafe {
-            let name = if cfg!(target_os = "macos") {
-                format!("_trmp{}", sig_index.index())
-            } else {
-                format!("trmp{}", sig_index.index())
-            };
-
-            let c_str = CString::new(name).unwrap();
-            let symbol = get_func_symbol(self.module, c_str.as_ptr());
-            assert!(!symbol.is_null());
-
-            mem::transmute(symbol)
-        };
-
-        let mut trap_out = WasmTrapInfo::Unknown;
-
-        // Here we go.
-        let success = unsafe {
-            invoke_trampoline(
-                trampoline,
-                vmctx_ptr,
-                func_ptr,
-                param_vec.as_ptr(),
-                return_vec.as_mut_ptr(),
-                &mut trap_out,
-                None,
-            )
-        };
-
-        if success {
-            Ok(return_vec
-                .iter()
-                .zip(signature.returns().iter())
-                .map(|(&x, ty)| match ty {
-                    Type::I32 => Value::I32(x as i32),
-                    Type::I64 => Value::I64(x as i64),
-                    Type::F32 => Value::F32(f32::from_bits(x as u32)),
-                    Type::F64 => Value::F64(f64::from_bits(x as u64)),
-                })
-                .collect())
-        } else {
-            Err(RuntimeError::Trap {
-                msg: trap_out.to_string().into(),
-            })
-        }
-    }
-
-    fn get_wasm_trampoline(&self, _module: &ModuleInner, sig_index: SigIndex) -> Option<Wasm> {
+    fn get_trampoline(&self, _: &ModuleInfo, sig_index: SigIndex) -> Option<Wasm> {
         let trampoline: unsafe extern "C" fn(
             *mut vm::Ctx,
             NonNull<vm::Func>,
@@ -433,49 +372,31 @@ impl ProtectedCaller for LLVMProtectedCaller {
         Some(unsafe { Wasm::from_raw_parts(trampoline, invoke_trampoline, None) })
     }
 
-    fn get_early_trapper(&self) -> Box<dyn UserTrapper> {
-        Box::new(Placeholder)
-    }
-}
-
-impl UserTrapper for Placeholder {
     unsafe fn do_early_trap(&self, data: Box<dyn Any>) -> ! {
         throw_any(Box::leak(data))
     }
 }
 
-fn get_func_from_index<'a>(
-    module: &'a ModuleInner,
-    import_backing: &ImportBacking,
-    func_index: FuncIndex,
-) -> (NonNull<vm::Func>, Context, &'a FuncSig, SigIndex) {
-    let sig_index = *module
-        .info
-        .func_assoc
-        .get(func_index)
-        .expect("broken invariant, incorrect func index");
+unsafe impl Send for LLVMCache {}
+unsafe impl Sync for LLVMCache {}
 
-    let (func_ptr, ctx) = match func_index.local_or_import(&module.info) {
-        LocalOrImport::Local(local_func_index) => (
-            module
-                .func_resolver
-                .get(&module, local_func_index)
-                .expect("broken invariant, func resolver not synced with module.exports")
-                .cast(),
-            Context::Internal,
-        ),
-        LocalOrImport::Import(imported_func_index) => {
-            let imported_func = import_backing.imported_func(imported_func_index);
-            (
-                NonNull::new(imported_func.func as *mut _).unwrap(),
-                Context::External(imported_func.vmctx),
-            )
+pub struct LLVMCache {
+    buffer: Arc<Buffer>,
+}
+
+impl CacheGen for LLVMCache {
+    fn generate_cache(&self) -> Result<(Box<[u8]>, Memory), CacheError> {
+        let mut memory = Memory::with_size_protect(self.buffer.len(), Protect::ReadWrite)
+            .map_err(CacheError::SerializeError)?;
+
+        let buffer = self.buffer.deref();
+
+        unsafe {
+            memory.as_slice_mut()[..buffer.len()].copy_from_slice(buffer);
         }
-    };
 
-    let signature = &module.info.signatures[sig_index];
-
-    (func_ptr, ctx, signature, sig_index)
+        Ok(([].as_ref().into(), memory))
+    }
 }
 
 #[cfg(feature = "disasm")]

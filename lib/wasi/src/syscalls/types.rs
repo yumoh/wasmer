@@ -2,6 +2,7 @@
 
 use crate::ptr::{Array, WasmPtr};
 use byteorder::{ReadBytesExt, WriteBytesExt, LE};
+use std::fmt;
 use std::mem;
 use wasmer_runtime_core::types::ValueType;
 
@@ -23,9 +24,9 @@ pub struct __wasi_ciovec_t {
 unsafe impl ValueType for __wasi_ciovec_t {}
 
 pub type __wasi_clockid_t = u32;
-pub const __WASI_CLOCK_MONOTONIC: u32 = 0;
-pub const __WASI_CLOCK_PROCESS_CPUTIME_ID: u32 = 1;
-pub const __WASI_CLOCK_REALTIME: u32 = 2;
+pub const __WASI_CLOCK_REALTIME: u32 = 0;
+pub const __WASI_CLOCK_MONOTONIC: u32 = 1;
+pub const __WASI_CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
 pub const __WASI_CLOCK_THREAD_CPUTIME_ID: u32 = 3;
 
 pub type __wasi_device_t = u64;
@@ -40,6 +41,31 @@ pub struct __wasi_dirent_t {
     pub d_ino: __wasi_inode_t,
     pub d_namlen: u32,
     pub d_type: __wasi_filetype_t,
+}
+
+unsafe impl ValueType for __wasi_dirent_t {}
+
+pub fn dirent_to_le_bytes(ent: &__wasi_dirent_t) -> Vec<u8> {
+    use std::mem::transmute;
+    let mut out = Vec::with_capacity(std::mem::size_of::<__wasi_dirent_t>());
+    let bytes: [u8; 8] = unsafe { transmute(ent.d_next.to_le()) };
+    for &b in &bytes {
+        out.push(b);
+    }
+    let bytes: [u8; 8] = unsafe { transmute(ent.d_ino.to_le()) };
+    for &b in &bytes {
+        out.push(b);
+    }
+    let bytes: [u8; 4] = unsafe { transmute(ent.d_namlen.to_le()) };
+    for &b in &bytes {
+        out.push(b);
+    }
+    out.push(ent.d_type);
+    out.push(0);
+    out.push(0);
+    out.push(0);
+    assert_eq!(out.len(), std::mem::size_of::<__wasi_dirent_t>());
+    out
 }
 
 pub type __wasi_errno_t = u16;
@@ -212,9 +238,15 @@ pub union __wasi_prestat_u {
     dir: __wasi_prestat_u_dir_t,
 }
 
+impl fmt::Debug for __wasi_prestat_u {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "__wasi_prestat_u")
+    }
+}
+
 unsafe impl ValueType for __wasi_prestat_u {}
 
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct __wasi_prestat_t {
     pub pr_type: __wasi_preopentype_t,
@@ -264,7 +296,7 @@ pub type __wasi_filedelta_t = i64;
 
 pub type __wasi_filesize_t = u64;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 #[repr(C)]
 pub struct __wasi_filestat_t {
     pub st_dev: __wasi_device_t,

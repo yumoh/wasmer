@@ -1,4 +1,6 @@
 use crate::varargs::VarArgs;
+#[cfg(target_os = "macos")]
+use libc::size_t;
 /// NOTE: TODO: These syscalls only support wasm_32 for now because they assume offsets are u32
 /// Syscall list: https://www.cs.utexas.edu/~bismith/test/syscalls/syscalls32.html
 use libc::{
@@ -24,6 +26,7 @@ use libc::{
     getrusage,
     getsockname,
     getsockopt,
+    getuid,
     gid_t,
     in_addr_t,
     in_port_t,
@@ -41,6 +44,7 @@ use libc::{
     pid_t,
     pread,
     pwrite,
+    readdir,
     // readv,
     recvfrom,
     recvmsg,
@@ -53,7 +57,6 @@ use libc::{
     sendto,
     setpgid,
     setsockopt,
-    size_t,
     sockaddr,
     socket,
     socklen_t,
@@ -72,6 +75,9 @@ use libc::{
     SO_REUSEADDR,
     TIOCGWINSZ,
 };
+
+#[allow(unused_imports)]
+use std::ffi::CStr;
 use wasmer_runtime_core::vm::Ctx;
 
 use crate::utils;
@@ -103,19 +109,23 @@ const SO_NOSIGPIPE: c_int = 0;
 /// open
 pub fn ___syscall5(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall5 (open) {}", _which);
-    let pathname: u32 = varargs.get(ctx);
+    let pathname_addr = varargs.get_str(ctx);
     let flags: i32 = varargs.get(ctx);
     let mode: u32 = varargs.get(ctx);
-    let pathname_addr = emscripten_memory_pointer!(ctx.memory(0), pathname) as *const i8;
-    let _path_str = unsafe { std::ffi::CStr::from_ptr(pathname_addr).to_str().unwrap() };
-    let fd = unsafe { open(pathname_addr, flags, mode) };
+    let real_path_owned = utils::get_cstr_path(ctx, pathname_addr);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        pathname_addr
+    };
+    let _path_str = unsafe { std::ffi::CStr::from_ptr(real_path).to_str().unwrap() };
+    let fd = unsafe { open(real_path, flags, mode) };
     debug!(
-        "=> pathname: {}, flags: {}, mode: {} = fd: {}\npath: {}\nlast os error: {}",
-        pathname,
+        "=> path: {}, flags: {}, mode: {} = fd: {}, last os error: {}",
+        _path_str,
         flags,
         mode,
         fd,
-        _path_str,
         Error::last_os_error(),
     );
     fd
@@ -125,10 +135,8 @@ pub fn ___syscall5(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int 
 pub fn ___syscall9(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall9 (link) {}", _which);
 
-    let oldname: c_int = varargs.get(ctx);
-    let newname: c_int = varargs.get(ctx);
-    let oldname_ptr = emscripten_memory_pointer!(ctx.memory(0), oldname) as *const i8;
-    let newname_ptr = emscripten_memory_pointer!(ctx.memory(0), newname) as *const i8;
+    let oldname_ptr = varargs.get_str(ctx);
+    let newname_ptr = varargs.get_str(ctx);
     let result = unsafe { link(oldname_ptr, newname_ptr) };
     debug!(
         "=> oldname: {}, newname: {}, result: {}",
@@ -155,15 +163,25 @@ pub fn ___syscall77(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int
 pub fn ___syscall83(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall83 (symlink) {}", _which);
 
-    let path1_ptr: c_int = varargs.get(ctx);
-    let path2_ptr: c_int = varargs.get(ctx);
-    let path1 = emscripten_memory_pointer!(ctx.memory(0), path1_ptr) as *mut i8;
-    let path2 = emscripten_memory_pointer!(ctx.memory(0), path2_ptr) as *mut i8;
-    let result = unsafe { symlink(path1, path2) };
+    let path1 = varargs.get_str(ctx);
+    let path2 = varargs.get_str(ctx);
+    let real_path1_owned = utils::get_cstr_path(ctx, path1);
+    let real_path1 = if let Some(ref rp) = real_path1_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        path1
+    };
+    let real_path2_owned = utils::get_cstr_path(ctx, path2);
+    let real_path2 = if let Some(ref rp) = real_path2_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        path2
+    };
+    let result = unsafe { symlink(real_path1, real_path2) };
     debug!(
         "=> path1: {}, path2: {}, result: {}",
-        unsafe { std::ffi::CStr::from_ptr(path1).to_str().unwrap() },
-        unsafe { std::ffi::CStr::from_ptr(path2).to_str().unwrap() },
+        unsafe { std::ffi::CStr::from_ptr(real_path1).to_str().unwrap() },
+        unsafe { std::ffi::CStr::from_ptr(real_path2).to_str().unwrap() },
         result,
     );
     result
@@ -185,14 +203,19 @@ pub fn ___syscall194(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
 /// lchown
 pub fn ___syscall198(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall198 (lchown) {}", _which);
-    let path: c_int = varargs.get(ctx);
+    let path_ptr = varargs.get_str(ctx);
+    let real_path_owned = utils::get_cstr_path(ctx, path_ptr);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        path_ptr
+    };
     let uid: uid_t = varargs.get(ctx);
     let gid: gid_t = varargs.get(ctx);
-    let path_ptr = emscripten_memory_pointer!(ctx.memory(0), path) as *const i8;
-    let result = unsafe { lchown(path_ptr, uid, gid) };
+    let result = unsafe { lchown(real_path, uid, gid) };
     debug!(
         "=> path: {}, uid: {}, gid: {}, result: {}",
-        unsafe { std::ffi::CStr::from_ptr(path_ptr).to_str().unwrap() },
+        unsafe { std::ffi::CStr::from_ptr(real_path).to_str().unwrap() },
         uid,
         gid,
         result,
@@ -221,13 +244,17 @@ pub fn ___syscall205(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
 pub fn ___syscall212(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall212 (chown) {}", _which);
 
-    let pathname: u32 = varargs.get(ctx);
+    let pathname_addr = varargs.get_str(ctx);
+    let real_path_owned = utils::get_cstr_path(ctx, pathname_addr);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        pathname_addr
+    };
     let owner: u32 = varargs.get(ctx);
     let group: u32 = varargs.get(ctx);
 
-    let pathname_addr = emscripten_memory_pointer!(ctx.memory(0), pathname) as *const i8;
-
-    unsafe { chown(pathname_addr, owner, group) }
+    unsafe { chown(real_path, owner, group) }
 }
 
 /// madvise
@@ -246,13 +273,19 @@ pub fn ___syscall219(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
 /// access
 pub fn ___syscall33(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall33 (access) {}", _which);
-    let path_ptr: c_int = varargs.get(ctx);
+    let path = varargs.get_str(ctx);
+    let real_path_owned = utils::get_cstr_path(ctx, path);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        path
+    };
     let amode: c_int = varargs.get(ctx);
-    let path = emscripten_memory_pointer!(ctx.memory(0), path_ptr) as *const i8;
-    let result = unsafe { access(path, amode) };
+    let result = unsafe { access(real_path, amode) };
     debug!(
-        "=> path: {}, result: {}",
-        unsafe { std::ffi::CStr::from_ptr(path).to_str().unwrap() },
+        "=> path: {}, amode: {}, result: {}",
+        unsafe { std::ffi::CStr::from_ptr(real_path).to_str().unwrap() },
+        amode,
         result
     );
     result
@@ -268,10 +301,15 @@ pub fn ___syscall34(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int
 // mkdir
 pub fn ___syscall39(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int {
     debug!("emscripten::___syscall39 (mkdir) {}", _which);
-    let pathname: u32 = varargs.get(ctx);
+    let pathname_addr = varargs.get_str(ctx);
+    let real_path_owned = utils::get_cstr_path(ctx, pathname_addr);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        pathname_addr
+    };
     let mode: u32 = varargs.get(ctx);
-    let pathname_addr = emscripten_memory_pointer!(ctx.memory(0), pathname) as *const i8;
-    unsafe { mkdir(pathname_addr, mode as _) }
+    unsafe { mkdir(real_path, mode as _) }
 }
 
 /// dup
@@ -354,8 +392,13 @@ pub fn ___syscall54(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int
     debug!("emscripten::___syscall54 (ioctl) {}", _which);
     let fd: i32 = varargs.get(ctx);
     let request: u32 = varargs.get(ctx);
-    debug!("fd: {}, op: {}", fd, request);
+    debug!("=> fd: {}, op: {}", fd, request);
     // Got the equivalents here: https://code.woboq.org/linux/linux/include/uapi/asm-generic/ioctls.h.html
+    // let argp: u32 = varargs.get(ctx);
+    // let argp_ptr = emscripten_memory_pointer!(ctx.memory(0), argp) as *mut c_void;
+    // let ret = unsafe { ioctl(fd, request as _, argp_ptr) };
+    // debug!("=> {}", ret);
+    // ret
     match request as _ {
         21537 => {
             // FIONBIO
@@ -571,15 +614,24 @@ pub fn ___syscall102(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
             // recvfrom (socket: c_int, buf: *const c_void, len: size_t, flags: c_int, addr: *const sockaddr, addrlen: socklen_t) -> ssize_t
             let socket = socket_varargs.get(ctx);
             let buf: u32 = socket_varargs.get(ctx);
-            let flags = socket_varargs.get(ctx);
             let len: i32 = socket_varargs.get(ctx);
+            let flags: i32 = socket_varargs.get(ctx);
             let address: u32 = socket_varargs.get(ctx);
             let address_len: u32 = socket_varargs.get(ctx);
             let buf_addr = emscripten_memory_pointer!(ctx.memory(0), buf) as _;
             let address = emscripten_memory_pointer!(ctx.memory(0), address) as *mut sockaddr;
             let address_len_addr =
                 emscripten_memory_pointer!(ctx.memory(0), address_len) as *mut socklen_t;
-            unsafe { recvfrom(socket, buf_addr, flags, len, address, address_len_addr) as i32 }
+            unsafe {
+                recvfrom(
+                    socket,
+                    buf_addr,
+                    len as usize,
+                    flags,
+                    address,
+                    address_len_addr,
+                ) as i32
+            }
         }
         14 => {
             debug!("socket: setsockopt");
@@ -725,7 +777,10 @@ pub fn ___syscall142(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
     let exceptfds: u32 = varargs.get(ctx);
     let _timeout: i32 = varargs.get(ctx);
 
-    assert!(nfds <= 64, "`nfds` must be less than or equal to 64");
+    if nfds > 1024 {
+        // EINVAL
+        return -22;
+    }
     assert!(exceptfds == 0, "`exceptfds` is not supporrted");
 
     let readfds_ptr = emscripten_memory_pointer!(ctx.memory(0), readfds) as _;
@@ -764,9 +819,14 @@ pub fn ___syscall122(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_in
 /// lstat64
 pub fn ___syscall196(ctx: &mut Ctx, _which: i32, mut varargs: VarArgs) -> i32 {
     debug!("emscripten::___syscall196 (lstat64) {}", _which);
-    let path_ptr: c_int = varargs.get(ctx);
+    let path = varargs.get_str(ctx);
+    let real_path_owned = utils::get_cstr_path(ctx, path);
+    let real_path = if let Some(ref rp) = real_path_owned {
+        rp.as_c_str().as_ptr()
+    } else {
+        path
+    };
     let buf_ptr: u32 = varargs.get(ctx);
-    let path = emscripten_memory_pointer!(ctx.memory(0), path_ptr) as *const i8;
     unsafe {
         let mut stat: stat = std::mem::zeroed();
 
@@ -776,9 +836,9 @@ pub fn ___syscall196(ctx: &mut Ctx, _which: i32, mut varargs: VarArgs) -> i32 {
         let stat_ptr = &mut stat as *mut stat;
 
         #[cfg(target_os = "macos")]
-        let ret = lstat64(path, stat_ptr);
+        let ret = lstat64(real_path, stat_ptr);
         #[cfg(not(target_os = "macos"))]
-        let ret = lstat(path, stat_ptr);
+        let ret = lstat(real_path, stat_ptr);
 
         debug!("ret: {}", ret);
         if ret != 0 {
@@ -787,6 +847,71 @@ pub fn ___syscall196(ctx: &mut Ctx, _which: i32, mut varargs: VarArgs) -> i32 {
         utils::copy_stat_into_wasm(ctx, buf_ptr, &stat);
     }
     0
+}
+
+// getuid
+pub fn ___syscall199(_ctx: &mut Ctx, _one: i32, _two: i32) -> i32 {
+    debug!("emscripten::___syscall199 (getuid)");
+    let uid = unsafe { getuid() as _ };
+    debug!("  => {}", uid);
+    uid
+}
+
+// getdents
+// dirent structure is
+// i64, i64, u16 (280), i8, [i8; 256]
+pub fn ___syscall220(ctx: &mut Ctx, _which: i32, mut varargs: VarArgs) -> i32 {
+    use super::super::env::get_emscripten_data;
+
+    let fd: i32 = varargs.get(ctx);
+    let dirp_addr: i32 = varargs.get(ctx);
+    let count: u32 = varargs.get(ctx);
+    debug!(
+        "emscripten::___syscall220 (getdents) {} {} {}",
+        fd, dirp_addr, count
+    );
+
+    let dirp = emscripten_memory_pointer!(ctx.memory(0), dirp_addr) as *mut u8;
+
+    let mut opened_dirs = &mut get_emscripten_data(ctx).opened_dirs;
+
+    // need to persist stream across calls?
+    // let dir: *mut libc::DIR = unsafe { libc::fdopendir(fd) };
+    let mut dir = &*opened_dirs
+        .entry(fd)
+        .or_insert_with(|| unsafe { Box::new(libc::fdopendir(fd)) });
+
+    let mut pos = 0;
+    let offset = 256 + 12;
+    while pos + offset <= count as usize {
+        let dirent = unsafe { readdir(**dir) };
+        if dirent.is_null() {
+            break;
+        }
+        #[allow(clippy::cast_ptr_alignment)]
+        unsafe {
+            *(dirp.add(pos) as *mut u32) = (*dirent).d_ino as u32;
+            *(dirp.add(pos + 4) as *mut u32) = pos as u32;
+            *(dirp.add(pos + 8) as *mut u16) = offset as u16;
+            *(dirp.add(pos + 10) as *mut u8) = (*dirent).d_type;
+            let upper_bound = std::cmp::min((*dirent).d_reclen, 255) as usize;
+            let mut i = 0;
+            while i < upper_bound {
+                *(dirp.add(pos + 11 + i) as *mut i8) = (*dirent).d_name[i];
+                i += 1;
+            }
+            // We set the termination string char
+            *(dirp.add(pos + 11 + i) as *mut i8) = 0 as i8;
+            debug!(
+                "  => file {}",
+                CStr::from_ptr(dirp.add(pos + 11) as *const i8)
+                    .to_str()
+                    .unwrap()
+            );
+        }
+        pos += offset;
+    }
+    pos as i32
 }
 
 /// fallocate

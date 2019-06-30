@@ -7,14 +7,81 @@ use generational_arena::{Arena, Index as Inode};
 use hashbrown::hash_map::{Entry, HashMap};
 use std::{
     cell::Cell,
-    io::{self, Write},
+    fs,
+    io::{self, Read, Seek, Write},
+    path::PathBuf,
     time::SystemTime,
 };
 use wasmer_runtime_core::debug;
-use zbox::{init_env as zbox_init_env, File, FileType, OpenOptions, Repo, RepoOpener};
 
 pub const MAX_SYMLINKS: usize = 100;
 
+#[derive(Debug)]
+pub enum WasiFile {
+    HostFile(fs::File),
+}
+
+impl Write for WasiFile {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self {
+            WasiFile::HostFile(hf) => hf.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            WasiFile::HostFile(hf) => hf.flush(),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        match self {
+            WasiFile::HostFile(hf) => hf.write_all(buf),
+        }
+    }
+
+    fn write_fmt(&mut self, fmt: ::std::fmt::Arguments) -> io::Result<()> {
+        match self {
+            WasiFile::HostFile(hf) => hf.write_fmt(fmt),
+        }
+    }
+}
+
+impl Read for WasiFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            WasiFile::HostFile(hf) => hf.read(buf),
+        }
+    }
+
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        match self {
+            WasiFile::HostFile(hf) => hf.read_to_end(buf),
+        }
+    }
+
+    fn read_to_string(&mut self, buf: &mut String) -> io::Result<usize> {
+        match self {
+            WasiFile::HostFile(hf) => hf.read_to_string(buf),
+        }
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        match self {
+            WasiFile::HostFile(hf) => hf.read_exact(buf),
+        }
+    }
+}
+
+impl Seek for WasiFile {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        match self {
+            WasiFile::HostFile(hf) => hf.seek(pos),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct InodeVal {
     pub stat: __wasi_filestat_t,
     pub is_preopened: bool,
@@ -22,13 +89,61 @@ pub struct InodeVal {
     pub kind: Kind,
 }
 
+impl InodeVal {
+    // TODO: clean this up
+    pub fn from_file_metadata(
+        metadata: &std::fs::Metadata,
+        name: String,
+        is_preopened: bool,
+        kind: Kind,
+    ) -> Self {
+        InodeVal {
+            stat: __wasi_filestat_t {
+                st_filetype: if metadata.is_dir() {
+                    __WASI_FILETYPE_DIRECTORY
+                } else {
+                    __WASI_FILETYPE_REGULAR_FILE
+                },
+                st_size: metadata.len(),
+                st_atim: metadata
+                    .accessed()
+                    .ok()
+                    .and_then(|sys_time| sys_time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos() as u64)
+                    .unwrap_or(0),
+                st_ctim: metadata
+                    .created()
+                    .ok()
+                    .and_then(|sys_time| sys_time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos() as u64)
+                    .unwrap_or(0),
+                st_mtim: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|sys_time| sys_time.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_nanos() as u64)
+                    .unwrap_or(0),
+                ..__wasi_filestat_t::default()
+            },
+            is_preopened,
+            name,
+            kind,
+        }
+    }
+}
+
 #[allow(dead_code)]
+#[derive(Debug)]
 pub enum Kind {
     File {
-        handle: File,
+        handle: WasiFile,
     },
     Dir {
-        handle: File,
+        /// Parent directory
+        parent: Option<Inode>,
+        /// The path on the host system where the directory is located
+        // TODO: wrap it like WasiFile
+        path: PathBuf,
         /// The entries of a directory are lazily filled.
         entries: HashMap<String, Inode>,
     },
@@ -40,7 +155,7 @@ pub enum Kind {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Fd {
     pub rights: __wasi_rights_t,
     pub rights_inheriting: __wasi_rights_t,
@@ -49,8 +164,9 @@ pub struct Fd {
     pub inode: Inode,
 }
 
+#[derive(Debug)]
 pub struct WasiFs {
-    // pub repo: Repo,
+    //pub repo: Repo,
     pub name_map: HashMap<String, Inode>,
     pub inodes: Arena<InodeVal>,
     pub fd_map: HashMap<u32, Fd>,
@@ -59,33 +175,87 @@ pub struct WasiFs {
 }
 
 impl WasiFs {
-    pub fn new() -> Result<Self, String> {
-        debug!("wasi::fs::init");
-        zbox_init_env();
-        debug!("wasi::fs::repo");
-        // let repo = RepoOpener::new()
-        //         .create(true)
-        //         .open("mem://wasmer-test-fs", "")
-        //         .map_err(|e| e.to_string())?;
+    pub fn new(
+        preopened_dirs: &[String],
+        mapped_dirs: &[(String, PathBuf)],
+    ) -> Result<Self, String> {
         debug!("wasi::fs::inodes");
         let inodes = Arena::new();
-        let res = Ok(Self {
-            // repo: repo,
+        let mut wasi_fs = Self {
             name_map: HashMap::new(),
             inodes: inodes,
             fd_map: HashMap::new(),
             next_fd: Cell::new(3),
             inode_counter: Cell::new(1000),
-        });
+        };
+        debug!("wasi::fs::preopen_dirs");
+        for dir in preopened_dirs {
+            debug!("Attempting to preopen {}", &dir);
+            // TODO: think about this
+            let default_rights = 0x1FFFFFFF; // all rights
+            let cur_dir = PathBuf::from(dir);
+            let cur_dir_metadata = cur_dir.metadata().expect("Could not find directory");
+            let kind = if cur_dir_metadata.is_dir() {
+                Kind::Dir {
+                    parent: None,
+                    path: cur_dir.clone(),
+                    entries: Default::default(),
+                }
+            } else {
+                return Err(format!(
+                    "WASI only supports pre-opened directories right now; found \"{}\"",
+                    &dir
+                ));
+            };
+            // TODO: handle nested pats in `file`
+            let inode_val =
+                InodeVal::from_file_metadata(&cur_dir_metadata, dir.clone(), true, kind);
+
+            let inode = wasi_fs.inodes.insert(inode_val);
+            wasi_fs.inodes[inode].stat.st_ino = wasi_fs.inode_counter.get();
+            wasi_fs
+                .create_fd(default_rights, default_rights, 0, inode)
+                .expect("Could not open fd");
+        }
+        debug!("wasi::fs::mapped_dirs");
+        for (alias, real_dir) in mapped_dirs {
+            debug!("Attempting to open {:?} at {}", real_dir, alias);
+            // TODO: think about this
+            let default_rights = 0x1FFFFFFF; // all rights
+            let cur_dir_metadata = real_dir
+                .metadata()
+                .expect("mapped dir not at previously verified location");
+            let kind = if cur_dir_metadata.is_dir() {
+                Kind::Dir {
+                    parent: None,
+                    path: real_dir.clone(),
+                    entries: Default::default(),
+                }
+            } else {
+                return Err(format!(
+                    "WASI only supports pre-opened directories right now; found \"{:?}\"",
+                    &real_dir,
+                ));
+            };
+            // TODO: handle nested pats in `file`
+            let inode_val =
+                InodeVal::from_file_metadata(&cur_dir_metadata, alias.clone(), true, kind);
+
+            let inode = wasi_fs.inodes.insert(inode_val);
+            wasi_fs.inodes[inode].stat.st_ino = wasi_fs.inode_counter.get();
+            wasi_fs
+                .create_fd(default_rights, default_rights, 0, inode)
+                .expect("Could not open fd");
+        }
         debug!("wasi::fs::end");
-        res
+        Ok(wasi_fs)
     }
 
     #[allow(dead_code)]
     fn get_inode(&mut self, path: &str) -> Option<Inode> {
         Some(match self.name_map.entry(path.to_string()) {
             Entry::Occupied(o) => *o.get(),
-            Entry::Vacant(v) => {
+            Entry::Vacant(_v) => {
                 return None;
                 // let file = if let Ok(file) = OpenOptions::new()
                 //     .read(true)
@@ -195,6 +365,8 @@ impl WasiFs {
     pub fn fdstat(&self, fd: __wasi_fd_t) -> Result<__wasi_fdstat_t, __wasi_errno_t> {
         let fd = self.fd_map.get(&fd).ok_or(__WASI_EBADF)?;
 
+        debug!("fdstat: {:?}", fd);
+
         Ok(__wasi_fdstat_t {
             fs_filetype: match self.inodes[fd.inode].kind {
                 Kind::File { .. } => __WASI_FILETYPE_REGULAR_FILE,
@@ -204,20 +376,22 @@ impl WasiFs {
             },
             fs_flags: fd.flags,
             fs_rights_base: fd.rights,
-            fs_rights_inheriting: fd.rights, // TODO(lachlan): Is this right?
+            fs_rights_inheriting: fd.rights_inheriting, // TODO(lachlan): Is this right?
         })
     }
 
     pub fn prestat_fd(&self, fd: __wasi_fd_t) -> Result<__wasi_prestat_t, __wasi_errno_t> {
         let fd = self.fd_map.get(&fd).ok_or(__WASI_EBADF)?;
 
+        debug!("in prestat_fd {:?}", fd);
         let inode_val = &self.inodes[fd.inode];
 
         if inode_val.is_preopened {
             Ok(__wasi_prestat_t {
                 pr_type: __WASI_PREOPENTYPE_DIR,
                 u: PrestatEnum::Dir {
-                    pr_name_len: inode_val.name.len() as u32,
+                    // REVIEW:
+                    pr_name_len: inode_val.name.len() as u32 + 1,
                 }
                 .untagged(),
             })
@@ -272,10 +446,92 @@ impl WasiFs {
         );
         Ok(idx)
     }
+
+    pub fn get_base_path_for_directory(&self, directory: Inode) -> Option<String> {
+        if let Kind::Dir { path, .. } = &self.inodes[directory].kind {
+            return Some(path.to_string_lossy().to_string());
+        }
+        None
+    }
 }
 
+#[derive(Debug)]
 pub struct WasiState<'a> {
     pub fs: WasiFs,
     pub args: &'a [Vec<u8>],
     pub envs: &'a [Vec<u8>],
+}
+
+pub fn host_file_type_to_wasi_file_type(file_type: fs::FileType) -> __wasi_filetype_t {
+    // TODO: handle other file types
+    if file_type.is_dir() {
+        __WASI_FILETYPE_DIRECTORY
+    } else if file_type.is_file() {
+        __WASI_FILETYPE_REGULAR_FILE
+    } else if file_type.is_symlink() {
+        __WASI_FILETYPE_SYMBOLIC_LINK
+    } else {
+        __WASI_FILETYPE_UNKNOWN
+    }
+}
+
+pub fn get_stat_for_kind(kind: &Kind) -> Option<__wasi_filestat_t> {
+    match kind {
+        Kind::File { handle } => match handle {
+            WasiFile::HostFile(hf) => {
+                let md = hf.metadata().ok()?;
+
+                Some(__wasi_filestat_t {
+                    st_filetype: host_file_type_to_wasi_file_type(md.file_type()),
+                    st_size: md.len(),
+                    st_atim: md
+                        .accessed()
+                        .ok()?
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos() as u64,
+                    st_mtim: md
+                        .modified()
+                        .ok()?
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .ok()?
+                        .as_nanos() as u64,
+                    st_ctim: md
+                        .created()
+                        .ok()
+                        .and_then(|ct| ct.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map(|ct| ct.as_nanos() as u64)
+                        .unwrap_or(0),
+                    ..__wasi_filestat_t::default()
+                })
+            }
+        },
+        Kind::Dir { path, .. } => {
+            let md = path.metadata().ok()?;
+            Some(__wasi_filestat_t {
+                st_filetype: host_file_type_to_wasi_file_type(md.file_type()),
+                st_size: md.len(),
+                st_atim: md
+                    .accessed()
+                    .ok()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos() as u64,
+                st_mtim: md
+                    .modified()
+                    .ok()?
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos() as u64,
+                st_ctim: md
+                    .created()
+                    .ok()
+                    .and_then(|ct| ct.duration_since(SystemTime::UNIX_EPOCH).ok())
+                    .map(|ct| ct.as_nanos() as u64)
+                    .unwrap_or(0),
+                ..__wasi_filestat_t::default()
+            })
+        }
+        _ => None,
+    }
 }

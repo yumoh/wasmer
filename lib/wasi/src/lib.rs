@@ -1,5 +1,9 @@
+#![deny(unused_imports, unused_variables, unused_unsafe, unreachable_patterns)]
+
 #[macro_use]
 extern crate log;
+#[cfg(target = "windows")]
+extern crate winapi;
 
 #[macro_use]
 mod macros;
@@ -12,12 +16,24 @@ use self::state::{WasiFs, WasiState};
 use self::syscalls::*;
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 
 pub use self::utils::is_wasi_module;
 
 use wasmer_runtime_core::{func, import::ImportObject, imports};
 
-pub fn generate_import_object(args: Vec<Vec<u8>>, envs: Vec<Vec<u8>>) -> ImportObject {
+/// This is returned in the Box<dyn Any> RuntimeError::Error variant.
+/// Use `downcast` or `downcast_ref` to retrieve the `ExitCode`.
+pub struct ExitCode {
+    pub code: syscalls::types::__wasi_exitcode_t,
+}
+
+pub fn generate_import_object(
+    args: Vec<Vec<u8>>,
+    envs: Vec<Vec<u8>>,
+    preopened_files: Vec<String>,
+    mapped_dirs: Vec<(String, PathBuf)>,
+) -> ImportObject {
     let state_gen = move || {
         fn state_destructor(data: *mut c_void) {
             unsafe {
@@ -26,7 +42,7 @@ pub fn generate_import_object(args: Vec<Vec<u8>>, envs: Vec<Vec<u8>>) -> ImportO
         }
 
         let state = Box::new(WasiState {
-            fs: WasiFs::new().unwrap(),
+            fs: WasiFs::new(&preopened_files, &mapped_dirs).unwrap(),
             args: &args[..],
             envs: &envs[..],
         });

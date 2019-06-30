@@ -1,6 +1,5 @@
 #![allow(clippy::forget_copy)] // Used by dynasm.
 
-use super::codegen::*;
 use crate::emitter_x64::*;
 use crate::machine::*;
 use crate::protect_unix;
@@ -9,24 +8,31 @@ use dynasmrt::{
 };
 use smallvec::SmallVec;
 use std::ptr::NonNull;
-use std::{any::Any, collections::HashMap, sync::Arc};
+use std::{
+    any::Any,
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
 use wasmer_runtime_core::{
-    backend::{FuncResolver, ProtectedCaller, Token, UserTrapper},
-    error::RuntimeResult,
+    backend::{
+        sys::Memory, Backend, CacheGen, CompilerConfig, MemoryBoundCheckMode, RunnableModule, Token,
+    },
+    cache::{Artifact, Error as CacheError},
+    codegen::*,
     memory::MemoryType,
     module::{ModuleInfo, ModuleInner},
     structures::{Map, TypedIndex},
     typed_func::Wasm,
     types::{
         FuncIndex, FuncSig, GlobalIndex, LocalFuncIndex, LocalOrImport, MemoryIndex, SigIndex,
-        TableIndex, Type, Value,
+        TableIndex, Type,
     },
-    vm::{self, ImportBacking, LocalGlobal, LocalMemory, LocalTable},
-    vmcalls,
+    vm::{self, LocalGlobal, LocalTable, INTERNALS_SIZE},
 };
 use wasmparser::{Operator, Type as WpType};
 
 lazy_static! {
+    /// Performs a System V call to `target` with [stack_top..stack_base] as the argument list, from right to left.
     static ref CONSTRUCT_STACK_AND_CALL_WASM: unsafe extern "C" fn (stack_top: *const u64, stack_base: *const u64, ctx: *mut vm::Ctx, target: *const vm::Func) -> u64 = {
         let mut assembler = Assembler::new().unwrap();
         let offset = assembler.offset();
@@ -120,6 +126,8 @@ pub struct X64ModuleCodeGenerator {
     function_labels: Option<HashMap<usize, (DynamicLabel, Option<AssemblyOffset>)>>,
     assembler: Option<Assembler>,
     func_import_count: usize,
+
+    config: Option<Arc<CodegenConfig>>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -132,10 +140,9 @@ pub struct X64FunctionCode {
     signatures: Arc<Map<SigIndex, FuncSig>>,
     function_signatures: Arc<Map<FuncIndex, SigIndex>>,
 
-    begin_offset: AssemblyOffset,
     assembler: Option<Assembler>,
     function_labels: Option<HashMap<usize, (DynamicLabel, Option<AssemblyOffset>)>>,
-    br_table_data: Option<Vec<Vec<usize>>>,
+    breakpoints: Option<HashMap<AssemblyOffset, Box<Fn(BkptInfo) + Send + Sync + 'static>>>,
     returns: SmallVec<[WpType; 1]>,
     locals: Vec<Location>,
     num_params: usize,
@@ -144,6 +151,8 @@ pub struct X64FunctionCode {
     control_stack: Vec<ControlFrame>,
     machine: Machine,
     unreachable_depth: usize,
+
+    config: Arc<CodegenConfig>,
 }
 
 enum FuncPtrInner {}
@@ -154,16 +163,15 @@ unsafe impl Send for FuncPtr {}
 unsafe impl Sync for FuncPtr {}
 
 pub struct X64ExecutionContext {
+    #[allow(dead_code)]
     code: ExecutableBuffer,
+    #[allow(dead_code)]
     functions: Vec<X64FunctionCode>,
     function_pointers: Vec<FuncPtr>,
+    function_offsets: Vec<AssemblyOffset>,
     signatures: Arc<Map<SigIndex, FuncSig>>,
-    _br_table_data: Vec<Vec<usize>>,
+    breakpoints: Arc<HashMap<usize, Box<Fn(BkptInfo) + Send + Sync + 'static>>>,
     func_import_count: usize,
-}
-
-pub struct X64RuntimeResolver {
-    local_function_pointers: Vec<FuncPtr>,
 }
 
 #[derive(Debug)]
@@ -182,94 +190,48 @@ pub enum IfElseState {
     Else,
 }
 
-impl X64ExecutionContext {
-    fn get_runtime_resolver(
+impl RunnableModule for X64ExecutionContext {
+    fn get_func(
         &self,
-        _module_info: &ModuleInfo,
-    ) -> Result<X64RuntimeResolver, CodegenError> {
-        Ok(X64RuntimeResolver {
-            local_function_pointers: self.function_pointers[self.func_import_count..].to_vec(),
-        })
-    }
-}
-
-impl FuncResolver for X64RuntimeResolver {
-    fn get(
-        &self,
-        _module: &ModuleInner,
-        _local_func_index: LocalFuncIndex,
+        _: &ModuleInfo,
+        local_func_index: LocalFuncIndex,
     ) -> Option<NonNull<vm::Func>> {
-        NonNull::new(
-            self.local_function_pointers[_local_func_index.index() as usize].0 as *mut vm::Func,
-        )
-    }
-}
-
-impl ProtectedCaller for X64ExecutionContext {
-    fn call(
-        &self,
-        _module: &ModuleInner,
-        _func_index: FuncIndex,
-        _params: &[Value],
-        _import_backing: &ImportBacking,
-        _vmctx: *mut vm::Ctx,
-        _: Token,
-    ) -> RuntimeResult<Vec<Value>> {
-        let index = _func_index.index() - self.func_import_count;
-        let ptr = self.code.ptr(self.functions[index].begin_offset);
-        let return_ty = self.functions[index].returns.last().cloned();
-        let buffer: Vec<u64> = _params
-            .iter()
-            .rev()
-            .map(|x| match *x {
-                Value::I32(x) => x as u32 as u64,
-                Value::I64(x) => x as u64,
-                Value::F32(x) => f32::to_bits(x) as u64,
-                Value::F64(x) => f64::to_bits(x),
-            })
-            .collect();
-        let ret = unsafe {
-            protect_unix::call_protected(|| {
-                CONSTRUCT_STACK_AND_CALL_WASM(
-                    buffer.as_ptr(),
-                    buffer.as_ptr().offset(buffer.len() as isize),
-                    _vmctx,
-                    ptr as _,
-                )
-            })
-        }?;
-        Ok(if let Some(ty) = return_ty {
-            vec![match ty {
-                WpType::I32 => Value::I32(ret as i32),
-                WpType::I64 => Value::I64(ret as i64),
-                WpType::F32 => Value::F32(f32::from_bits(ret as u32)),
-                WpType::F64 => Value::F64(f64::from_bits(ret as u64)),
-                _ => unreachable!(),
-            }]
-        } else {
-            vec![]
-        })
+        self.function_pointers[self.func_import_count..]
+            .get(local_func_index.index())
+            .and_then(|ptr| NonNull::new(ptr.0 as *mut vm::Func))
     }
 
-    fn get_wasm_trampoline(&self, module: &ModuleInner, sig_index: SigIndex) -> Option<Wasm> {
+    fn get_trampoline(&self, _: &ModuleInfo, sig_index: SigIndex) -> Option<Wasm> {
         use std::ffi::c_void;
         use wasmer_runtime_core::typed_func::WasmTrapInfo;
 
         unsafe extern "C" fn invoke(
-            trampoline: unsafe extern "C" fn(*mut vm::Ctx, NonNull<vm::Func>, *const u64, *mut u64),
+            _trampoline: unsafe extern "C" fn(
+                *mut vm::Ctx,
+                NonNull<vm::Func>,
+                *const u64,
+                *mut u64,
+            ),
             ctx: *mut vm::Ctx,
             func: NonNull<vm::Func>,
             args: *const u64,
             rets: *mut u64,
             trap_info: *mut WasmTrapInfo,
+            user_error: *mut Option<Box<dyn Any>>,
             num_params_plus_one: Option<NonNull<c_void>>,
         ) -> bool {
+            let rm: &Box<dyn RunnableModule> = &(&*(*ctx).module).runnable_module;
+            let execution_context =
+                ::std::mem::transmute_copy::<&dyn RunnableModule, &X64ExecutionContext>(&&**rm);
+
             let args = ::std::slice::from_raw_parts(
                 args,
                 num_params_plus_one.unwrap().as_ptr() as usize - 1,
             );
             let args_reverse: SmallVec<[u64; 8]> = args.iter().cloned().rev().collect();
-            match protect_unix::call_protected(|| {
+            protect_unix::BKPT_MAP
+                .with(|x| x.borrow_mut().push(execution_context.breakpoints.clone()));
+            let ret = match protect_unix::call_protected(|| {
                 CONSTRUCT_STACK_AND_CALL_WASM(
                     args_reverse.as_ptr(),
                     args_reverse.as_ptr().offset(args_reverse.len() as isize),
@@ -278,11 +240,21 @@ impl ProtectedCaller for X64ExecutionContext {
                 )
             }) {
                 Ok(x) => {
-                    *rets = x;
+                    if !rets.is_null() {
+                        *rets = x;
+                    }
                     true
                 }
-                Err(_) => false,
-            }
+                Err(err) => {
+                    match err {
+                        protect_unix::CallProtError::Trap(info) => *trap_info = info,
+                        protect_unix::CallProtError::Error(data) => *user_error = Some(data),
+                    }
+                    false
+                }
+            };
+            protect_unix::BKPT_MAP.with(|x| x.borrow_mut().pop().unwrap());
+            ret
         }
 
         unsafe extern "C" fn dummy_trampoline(
@@ -303,22 +275,35 @@ impl ProtectedCaller for X64ExecutionContext {
         })
     }
 
-    fn get_early_trapper(&self) -> Box<dyn UserTrapper> {
-        pub struct Trapper;
+    unsafe fn do_early_trap(&self, data: Box<Any>) -> ! {
+        protect_unix::TRAP_EARLY_DATA.with(|x| x.set(Some(data)));
+        protect_unix::trigger_trap();
+    }
 
-        impl UserTrapper for Trapper {
-            unsafe fn do_early_trap(&self, data: Box<Any>) -> ! {
-                protect_unix::TRAP_EARLY_DATA.with(|x| x.set(Some(data)));
-                protect_unix::trigger_trap();
-            }
-        }
+    fn get_code(&self) -> Option<&[u8]> {
+        Some(&self.code)
+    }
 
-        Box::new(Trapper)
+    fn get_offsets(&self) -> Option<Vec<usize>> {
+        Some(self.function_offsets.iter().map(|x| x.0).collect())
     }
 }
 
-impl X64ModuleCodeGenerator {
-    pub fn new() -> X64ModuleCodeGenerator {
+#[derive(Debug)]
+pub struct CodegenError {
+    pub message: &'static str,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct CodegenConfig {
+    memory_bound_check_mode: MemoryBoundCheckMode,
+    enforce_stack_check: bool,
+}
+
+impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, CodegenError>
+    for X64ModuleCodeGenerator
+{
+    fn new() -> X64ModuleCodeGenerator {
         X64ModuleCodeGenerator {
             functions: vec![],
             signatures: None,
@@ -326,30 +311,35 @@ impl X64ModuleCodeGenerator {
             function_labels: Some(HashMap::new()),
             assembler: Some(Assembler::new().unwrap()),
             func_import_count: 0,
+            config: None,
         }
     }
-}
 
-impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolver>
-    for X64ModuleCodeGenerator
-{
+    fn backend_id() -> Backend {
+        Backend::Singlepass
+    }
+
     fn check_precondition(&mut self, _module_info: &ModuleInfo) -> Result<(), CodegenError> {
         Ok(())
     }
 
-    fn next_function(&mut self) -> Result<&mut X64FunctionCode, CodegenError> {
-        let (mut assembler, mut function_labels, br_table_data) = match self.functions.last_mut() {
+    fn next_function(
+        &mut self,
+        _module_info: Arc<RwLock<ModuleInfo>>,
+    ) -> Result<&mut X64FunctionCode, CodegenError> {
+        let (mut assembler, mut function_labels, breakpoints) = match self.functions.last_mut() {
             Some(x) => (
                 x.assembler.take().unwrap(),
                 x.function_labels.take().unwrap(),
-                x.br_table_data.take().unwrap(),
+                x.breakpoints.take().unwrap(),
             ),
             None => (
                 self.assembler.take().unwrap(),
                 self.function_labels.take().unwrap(),
-                vec![],
+                HashMap::new(),
             ),
         };
+
         let begin_offset = assembler.offset();
         let begin_label_info = function_labels
             .entry(self.functions.len() + self.func_import_count)
@@ -367,10 +357,9 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
             signatures: self.signatures.as_ref().unwrap().clone(),
             function_signatures: self.function_signatures.as_ref().unwrap().clone(),
 
-            begin_offset: begin_offset,
             assembler: Some(assembler),
             function_labels: Some(function_labels),
-            br_table_data: Some(br_table_data),
+            breakpoints: Some(breakpoints),
             returns: smallvec![],
             locals: vec![],
             num_params: 0,
@@ -379,6 +368,7 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
             control_stack: vec![],
             machine: Machine::new(),
             unreachable_depth: 0,
+            config: self.config.as_ref().unwrap().clone(),
         };
         self.functions.push(code);
         Ok(self.functions.last_mut().unwrap())
@@ -386,10 +376,10 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
 
     fn finalize(
         mut self,
-        module_info: &ModuleInfo,
-    ) -> Result<(X64ExecutionContext, X64RuntimeResolver), CodegenError> {
-        let (assembler, mut br_table_data) = match self.functions.last_mut() {
-            Some(x) => (x.assembler.take().unwrap(), x.br_table_data.take().unwrap()),
+        _: &ModuleInfo,
+    ) -> Result<(X64ExecutionContext, Box<dyn CacheGen>), CodegenError> {
+        let (assembler, breakpoints) = match self.functions.last_mut() {
+            Some(x) => (x.assembler.take().unwrap(), x.breakpoints.take().unwrap()),
             None => {
                 return Err(CodegenError {
                     message: "no function",
@@ -398,18 +388,13 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
         };
         let output = assembler.finalize().unwrap();
 
-        for table in &mut br_table_data {
-            for entry in table {
-                *entry = output.ptr(AssemblyOffset(*entry)) as usize;
-            }
-        }
-
         let function_labels = if let Some(x) = self.functions.last() {
             x.function_labels.as_ref().unwrap()
         } else {
             self.function_labels.as_ref().unwrap()
         };
         let mut out_labels: Vec<FuncPtr> = vec![];
+        let mut out_offsets: Vec<AssemblyOffset> = vec![];
 
         for i in 0..function_labels.len() {
             let (_, offset) = match function_labels.get(&i) {
@@ -429,19 +414,36 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
                 }
             };
             out_labels.push(FuncPtr(output.ptr(*offset) as _));
+            out_offsets.push(*offset);
         }
 
-        let ctx = X64ExecutionContext {
-            code: output,
-            functions: self.functions,
-            signatures: self.signatures.as_ref().unwrap().clone(),
-            _br_table_data: br_table_data,
-            func_import_count: self.func_import_count,
-            function_pointers: out_labels,
-        };
-        let resolver = ctx.get_runtime_resolver(module_info)?;
+        let breakpoints: Arc<HashMap<_, _>> = Arc::new(
+            breakpoints
+                .into_iter()
+                .map(|(offset, f)| (output.ptr(offset) as usize, f))
+                .collect(),
+        );
 
-        Ok((ctx, resolver))
+        struct Placeholder;
+        impl CacheGen for Placeholder {
+            fn generate_cache(&self) -> Result<(Box<[u8]>, Memory), CacheError> {
+                Err(CacheError::Unknown(
+                    "the singlepass backend doesn't support caching yet".to_string(),
+                ))
+            }
+        }
+        Ok((
+            X64ExecutionContext {
+                code: output,
+                functions: self.functions,
+                signatures: self.signatures.as_ref().unwrap().clone(),
+                breakpoints: breakpoints,
+                func_import_count: self.func_import_count,
+                function_pointers: out_labels,
+                function_offsets: out_offsets,
+            },
+            Box::new(Placeholder),
+        ))
     }
 
     fn feed_signatures(&mut self, signatures: Map<SigIndex, FuncSig>) -> Result<(), CodegenError> {
@@ -467,6 +469,9 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
         a.emit_label(label);
         labels.insert(id, (label, Some(offset)));
 
+        // Emits a tail call trampoline that loads the address of the target import function
+        // from Ctx and jumps to it.
+
         a.emit_mov(
             Size::S64,
             Location::Memory(GPR::RDI, vm::Ctx::offset_imported_funcs() as i32),
@@ -487,9 +492,23 @@ impl ModuleCodeGenerator<X64FunctionCode, X64ExecutionContext, X64RuntimeResolve
 
         Ok(())
     }
+
+    fn feed_compiler_config(&mut self, config: &CompilerConfig) -> Result<(), CodegenError> {
+        self.config = Some(Arc::new(CodegenConfig {
+            memory_bound_check_mode: config.memory_bound_check_mode,
+            enforce_stack_check: config.enforce_stack_check,
+        }));
+        Ok(())
+    }
+    unsafe fn from_cache(_artifact: Artifact, _: Token) -> Result<ModuleInner, CacheError> {
+        Err(CacheError::Unknown(
+            "the singlepass compiler API doesn't support caching yet".to_string(),
+        ))
+    }
 }
 
 impl X64FunctionCode {
+    /// Moves `loc` to a valid location for `div`/`idiv`.
     fn emit_relaxed_xdiv(
         a: &mut Assembler,
         _m: &mut Machine,
@@ -508,6 +527,7 @@ impl X64FunctionCode {
         }
     }
 
+    /// Moves `src` and `dst` to valid locations for `movzx`/`movsx`.
     fn emit_relaxed_zx_sx(
         a: &mut Assembler,
         m: &mut Machine,
@@ -545,6 +565,7 @@ impl X64FunctionCode {
         m.release_temp_gpr(tmp_src);
     }
 
+    /// Moves `src` and `dst` to valid locations for generic instructions.
     fn emit_relaxed_binop(
         a: &mut Assembler,
         m: &mut Machine,
@@ -610,6 +631,7 @@ impl X64FunctionCode {
         }
     }
 
+    /// Moves `src1` and `src2` to valid locations and possibly adds a layer of indirection for `dst` for AVX instructions.
     fn emit_relaxed_avx(
         a: &mut Assembler,
         m: &mut Machine,
@@ -628,6 +650,7 @@ impl X64FunctionCode {
         )
     }
 
+    /// Moves `src1` and `src2` to valid locations and possibly adds a layer of indirection for `dst` for AVX instructions.
     fn emit_relaxed_avx_base<F: FnOnce(&mut Assembler, &mut Machine, XMM, XMMOrMemory, XMM)>(
         a: &mut Assembler,
         m: &mut Machine,
@@ -697,6 +720,7 @@ impl X64FunctionCode {
         m.release_temp_xmm(tmp1);
     }
 
+    /// I32 binary operation with both operands popped from the virtual stack.
     fn emit_binop_i32(
         a: &mut Assembler,
         m: &mut Machine,
@@ -735,6 +759,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I64 binary operation with both operands popped from the virtual stack.
     fn emit_binop_i64(
         a: &mut Assembler,
         m: &mut Machine,
@@ -773,6 +798,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I32 comparison with `loc_b` from input.
     fn emit_cmpop_i32_dynamic_b(
         a: &mut Assembler,
         m: &mut Machine,
@@ -803,6 +829,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I32 comparison with both operands popped from the virtual stack.
     fn emit_cmpop_i32(
         a: &mut Assembler,
         m: &mut Machine,
@@ -813,6 +840,7 @@ impl X64FunctionCode {
         Self::emit_cmpop_i32_dynamic_b(a, m, value_stack, c, loc_b);
     }
 
+    /// I64 comparison with `loc_b` from input.
     fn emit_cmpop_i64_dynamic_b(
         a: &mut Assembler,
         m: &mut Machine,
@@ -843,6 +871,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I64 comparison with both operands popped from the virtual stack.
     fn emit_cmpop_i64(
         a: &mut Assembler,
         m: &mut Machine,
@@ -853,6 +882,7 @@ impl X64FunctionCode {
         Self::emit_cmpop_i64_dynamic_b(a, m, value_stack, c, loc_b);
     }
 
+    /// I32 `lzcnt`/`tzcnt`/`popcnt` with operand popped from the virtual stack.
     fn emit_xcnt_i32(
         a: &mut Assembler,
         m: &mut Machine,
@@ -891,6 +921,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I64 `lzcnt`/`tzcnt`/`popcnt` with operand popped from the virtual stack.
     fn emit_xcnt_i64(
         a: &mut Assembler,
         m: &mut Machine,
@@ -929,6 +960,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I32 shift with both operands popped from the virtual stack.
     fn emit_shift_i32(
         a: &mut Assembler,
         m: &mut Machine,
@@ -949,6 +981,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// I64 shift with both operands popped from the virtual stack.
     fn emit_shift_i64(
         a: &mut Assembler,
         m: &mut Machine,
@@ -969,6 +1002,7 @@ impl X64FunctionCode {
         value_stack.push((ret, LocalOrTemp::Temp));
     }
 
+    /// Floating point (AVX) binary operation with both operands popped from the virtual stack.
     fn emit_fp_binop_avx(
         a: &mut Assembler,
         m: &mut Machine,
@@ -983,6 +1017,7 @@ impl X64FunctionCode {
         Self::emit_relaxed_avx(a, m, f, loc_a, loc_b, ret);
     }
 
+    /// Floating point (AVX) comparison with both operands popped from the virtual stack.
     fn emit_fp_cmpop_avx(
         a: &mut Assembler,
         m: &mut Machine,
@@ -998,6 +1033,7 @@ impl X64FunctionCode {
         a.emit_and(Size::S32, Location::Imm32(1), ret); // FIXME: Why?
     }
 
+    /// Floating point (AVX) binary operation with both operands popped from the virtual stack.
     fn emit_fp_unop_avx(
         a: &mut Assembler,
         m: &mut Machine,
@@ -1011,7 +1047,9 @@ impl X64FunctionCode {
         Self::emit_relaxed_avx(a, m, f, loc, loc, ret);
     }
 
-    // This function must not use RAX before `cb` is called.
+    /// Emits a System V call sequence.
+    ///
+    /// This function must not use RAX before `cb` is called.
     fn emit_call_sysv<I: Iterator<Item = Location>, F: FnOnce(&mut Assembler)>(
         a: &mut Assembler,
         m: &mut Machine,
@@ -1069,7 +1107,7 @@ impl X64FunctionCode {
         let mut call_movs: Vec<(Location, GPR)> = vec![];
 
         // Prepare register & stack parameters.
-        for (i, param) in params.iter().enumerate() {
+        for (i, param) in params.iter().enumerate().rev() {
             let loc = Machine::get_param_location(1 + i);
             match loc {
                 Location::GPR(x) => {
@@ -1167,6 +1205,7 @@ impl X64FunctionCode {
         }
     }
 
+    /// Emits a System V call sequence, specialized for labels as the call target.
     fn emit_call_sysv_label<I: Iterator<Item = Location>>(
         a: &mut Assembler,
         m: &mut Machine,
@@ -1176,8 +1215,10 @@ impl X64FunctionCode {
         Self::emit_call_sysv(a, m, |a| a.emit_call_label(label), params)
     }
 
+    /// Emits a memory operation.
     fn emit_memory_op<F: FnOnce(&mut Assembler, &mut Machine, GPR)>(
         module_info: &ModuleInfo,
+        config: &CodegenConfig,
         a: &mut Assembler,
         m: &mut Machine,
         addr: Location,
@@ -1185,56 +1226,69 @@ impl X64FunctionCode {
         value_size: usize,
         cb: F,
     ) {
-        let tmp_addr = m.acquire_temp_gpr().unwrap();
-        let tmp_base = m.acquire_temp_gpr().unwrap();
-        let tmp_bound = m.acquire_temp_gpr().unwrap();
-
-        a.emit_mov(
-            Size::S64,
-            Location::Memory(
-                Machine::get_vmctx_reg(),
-                match MemoryIndex::new(0).local_or_import(module_info) {
-                    LocalOrImport::Local(_) => vm::Ctx::offset_memories(),
-                    LocalOrImport::Import(_) => vm::Ctx::offset_imported_memories(),
-                } as i32,
-            ),
-            Location::GPR(tmp_base),
-        );
-        a.emit_mov(
-            Size::S64,
-            Location::Memory(tmp_base, 0),
-            Location::GPR(tmp_base),
-        );
-        a.emit_mov(
-            Size::S32,
-            Location::Memory(tmp_base, LocalMemory::offset_bound() as i32),
-            Location::GPR(tmp_bound),
-        );
-        a.emit_mov(
-            Size::S64,
-            Location::Memory(tmp_base, LocalMemory::offset_base() as i32),
-            Location::GPR(tmp_base),
-        );
-        a.emit_add(Size::S64, Location::GPR(tmp_base), Location::GPR(tmp_bound));
-
+        // If the memory is dynamic, we need to do bound checking at runtime.
         let mem_desc = match MemoryIndex::new(0).local_or_import(module_info) {
             LocalOrImport::Local(local_mem_index) => &module_info.memories[local_mem_index],
             LocalOrImport::Import(import_mem_index) => {
                 &module_info.imported_memories[import_mem_index].1
             }
         };
-        let need_check = match mem_desc.memory_type() {
-            MemoryType::Dynamic => true,
-            MemoryType::Static | MemoryType::SharedStatic => false,
+        let need_check = match config.memory_bound_check_mode {
+            MemoryBoundCheckMode::Default => match mem_desc.memory_type() {
+                MemoryType::Dynamic => true,
+                MemoryType::Static | MemoryType::SharedStatic => false,
+            },
+            MemoryBoundCheckMode::Enable => true,
+            MemoryBoundCheckMode::Disable => false,
         };
 
+        let tmp_addr = m.acquire_temp_gpr().unwrap();
+        let tmp_base = m.acquire_temp_gpr().unwrap();
+        let tmp_bound = m.acquire_temp_gpr().unwrap();
+
+        // Load base into temporary register.
+        a.emit_mov(
+            Size::S64,
+            Location::Memory(
+                Machine::get_vmctx_reg(),
+                vm::Ctx::offset_memory_base() as i32,
+            ),
+            Location::GPR(tmp_base),
+        );
+
         if need_check {
-            a.emit_mov(Size::S32, addr, Location::GPR(tmp_addr));
-            a.emit_add(
+            a.emit_mov(
                 Size::S64,
-                Location::Imm32((offset + value_size) as u32),
-                Location::GPR(tmp_addr),
+                Location::Memory(
+                    Machine::get_vmctx_reg(),
+                    vm::Ctx::offset_memory_bound() as i32,
+                ),
+                Location::GPR(tmp_bound),
             );
+            // Adds base to bound so `tmp_bound` now holds the end of linear memory.
+            a.emit_add(Size::S64, Location::GPR(tmp_base), Location::GPR(tmp_bound));
+            a.emit_mov(Size::S32, addr, Location::GPR(tmp_addr));
+
+            // This branch is used for emitting "faster" code for the special case of (offset + value_size) not exceeding u32 range.
+            match (offset as u32).checked_add(value_size as u32) {
+                Some(x) => {
+                    a.emit_add(Size::S64, Location::Imm32(x), Location::GPR(tmp_addr));
+                }
+                None => {
+                    a.emit_add(
+                        Size::S64,
+                        Location::Imm32(offset as u32),
+                        Location::GPR(tmp_addr),
+                    );
+                    a.emit_add(
+                        Size::S64,
+                        Location::Imm32(value_size as u32),
+                        Location::GPR(tmp_addr),
+                    );
+                }
+            }
+
+            // Trap if the end address of the requested area is above that of the linear memory.
             a.emit_add(Size::S64, Location::GPR(tmp_base), Location::GPR(tmp_addr));
             a.emit_cmp(Size::S64, Location::GPR(tmp_bound), Location::GPR(tmp_addr));
             a.emit_conditional_trap(Condition::Above);
@@ -1242,6 +1296,7 @@ impl X64FunctionCode {
 
         m.release_temp_gpr(tmp_bound);
 
+        // Calculates the real address, and loads from it.
         a.emit_mov(Size::S32, addr, Location::GPR(tmp_addr));
         a.emit_add(
             Size::S64,
@@ -1256,6 +1311,7 @@ impl X64FunctionCode {
         m.release_temp_gpr(tmp_addr);
     }
 
+    // Checks for underflow/overflow/nan before IxxTrunc{U/S}F32.
     fn emit_f32_int_conv_check(
         a: &mut Assembler,
         m: &mut Machine,
@@ -1275,18 +1331,18 @@ impl X64FunctionCode {
         // Underflow.
         a.emit_mov(Size::S32, Location::Imm32(lower_bound), Location::GPR(tmp));
         a.emit_mov(Size::S32, Location::GPR(tmp), Location::XMM(tmp_x));
-        a.emit_vcmpltss(tmp_x, XMMOrMemory::XMM(reg), tmp_x);
+        a.emit_vcmpless(reg, XMMOrMemory::XMM(tmp_x), tmp_x);
         a.emit_mov(Size::S32, Location::XMM(tmp_x), Location::GPR(tmp));
-        a.emit_cmp(Size::S32, Location::Imm32(1), Location::GPR(tmp));
-        a.emit_jmp(Condition::Equal, trap);
+        a.emit_cmp(Size::S32, Location::Imm32(0), Location::GPR(tmp));
+        a.emit_jmp(Condition::NotEqual, trap);
 
         // Overflow.
         a.emit_mov(Size::S32, Location::Imm32(upper_bound), Location::GPR(tmp));
         a.emit_mov(Size::S32, Location::GPR(tmp), Location::XMM(tmp_x));
-        a.emit_vcmpgtss(tmp_x, XMMOrMemory::XMM(reg), tmp_x);
+        a.emit_vcmpgess(reg, XMMOrMemory::XMM(tmp_x), tmp_x);
         a.emit_mov(Size::S32, Location::XMM(tmp_x), Location::GPR(tmp));
-        a.emit_cmp(Size::S32, Location::Imm32(1), Location::GPR(tmp));
-        a.emit_jmp(Condition::Equal, trap);
+        a.emit_cmp(Size::S32, Location::Imm32(0), Location::GPR(tmp));
+        a.emit_jmp(Condition::NotEqual, trap);
 
         // NaN.
         a.emit_vcmpeqss(reg, XMMOrMemory::XMM(reg), tmp_x);
@@ -1303,6 +1359,7 @@ impl X64FunctionCode {
         m.release_temp_gpr(tmp);
     }
 
+    // Checks for underflow/overflow/nan before IxxTrunc{U/S}F64.
     fn emit_f64_int_conv_check(
         a: &mut Assembler,
         m: &mut Machine,
@@ -1322,18 +1379,18 @@ impl X64FunctionCode {
         // Underflow.
         a.emit_mov(Size::S64, Location::Imm64(lower_bound), Location::GPR(tmp));
         a.emit_mov(Size::S64, Location::GPR(tmp), Location::XMM(tmp_x));
-        a.emit_vcmpltsd(tmp_x, XMMOrMemory::XMM(reg), tmp_x);
+        a.emit_vcmplesd(reg, XMMOrMemory::XMM(tmp_x), tmp_x);
         a.emit_mov(Size::S32, Location::XMM(tmp_x), Location::GPR(tmp));
-        a.emit_cmp(Size::S32, Location::Imm32(1), Location::GPR(tmp));
-        a.emit_jmp(Condition::Equal, trap);
+        a.emit_cmp(Size::S32, Location::Imm32(0), Location::GPR(tmp));
+        a.emit_jmp(Condition::NotEqual, trap);
 
         // Overflow.
         a.emit_mov(Size::S64, Location::Imm64(upper_bound), Location::GPR(tmp));
         a.emit_mov(Size::S64, Location::GPR(tmp), Location::XMM(tmp_x));
-        a.emit_vcmpgtsd(tmp_x, XMMOrMemory::XMM(reg), tmp_x);
+        a.emit_vcmpgesd(reg, XMMOrMemory::XMM(tmp_x), tmp_x);
         a.emit_mov(Size::S32, Location::XMM(tmp_x), Location::GPR(tmp));
-        a.emit_cmp(Size::S32, Location::Imm32(1), Location::GPR(tmp));
-        a.emit_jmp(Condition::Equal, trap);
+        a.emit_cmp(Size::S32, Location::Imm32(0), Location::GPR(tmp));
+        a.emit_jmp(Condition::NotEqual, trap);
 
         // NaN.
         a.emit_vcmpeqsd(reg, XMMOrMemory::XMM(reg), tmp_x);
@@ -1351,7 +1408,7 @@ impl X64FunctionCode {
     }
 }
 
-impl FunctionCodeGenerator for X64FunctionCode {
+impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
     fn feed_return(&mut self, ty: WpType) -> Result<(), CodegenError> {
         self.returns.push(ty);
         Ok(())
@@ -1368,14 +1425,29 @@ impl FunctionCodeGenerator for X64FunctionCode {
         Ok(())
     }
 
-    fn begin_body(&mut self) -> Result<(), CodegenError> {
+    fn begin_body(&mut self, _module_info: &ModuleInfo) -> Result<(), CodegenError> {
         let a = self.assembler.as_mut().unwrap();
         a.emit_push(Size::S64, Location::GPR(GPR::RBP));
         a.emit_mov(Size::S64, Location::GPR(GPR::RSP), Location::GPR(GPR::RBP));
 
+        // Stack check.
+        if self.config.enforce_stack_check {
+            a.emit_cmp(
+                Size::S64,
+                Location::Memory(
+                    GPR::RDI, // first parameter is vmctx
+                    vm::Ctx::offset_stack_lower_bound() as i32,
+                ),
+                Location::GPR(GPR::RSP),
+            );
+            a.emit_conditional_trap(Condition::Below);
+        }
+
         self.locals = self
             .machine
             .init_locals(a, self.num_locals, self.num_params);
+
+        a.emit_sub(Size::S64, Location::Imm32(32), Location::GPR(GPR::RSP)); // simulate "red zone" if not supported by the platform
 
         self.control_stack.push(ControlFrame {
             label: a.get_label(),
@@ -1393,30 +1465,33 @@ impl FunctionCodeGenerator for X64FunctionCode {
         Ok(())
     }
 
-    fn feed_opcode(&mut self, op: Operator, module_info: &ModuleInfo) -> Result<(), CodegenError> {
+    fn feed_event(&mut self, ev: Event, module_info: &ModuleInfo) -> Result<(), CodegenError> {
         //println!("{:?} {}", op, self.value_stack.len());
         let was_unreachable;
 
         if self.unreachable_depth > 0 {
             was_unreachable = true;
-            match op {
-                Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
-                    self.unreachable_depth += 1;
-                }
-                Operator::End => {
-                    self.unreachable_depth -= 1;
-                }
-                Operator::Else => {
-                    // We are in a reachable true branch
-                    if self.unreachable_depth == 1 {
-                        if let Some(IfElseState::If(_)) =
-                            self.control_stack.last().map(|x| x.if_else)
-                        {
-                            self.unreachable_depth -= 1;
+
+            if let Event::Wasm(op) = ev {
+                match *op {
+                    Operator::Block { .. } | Operator::Loop { .. } | Operator::If { .. } => {
+                        self.unreachable_depth += 1;
+                    }
+                    Operator::End => {
+                        self.unreachable_depth -= 1;
+                    }
+                    Operator::Else => {
+                        // We are in a reachable true branch
+                        if self.unreachable_depth == 1 {
+                            if let Some(IfElseState::If(_)) =
+                                self.control_stack.last().map(|x| x.if_else)
+                            {
+                                self.unreachable_depth -= 1;
+                            }
                         }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
             if self.unreachable_depth > 0 {
                 return Ok(());
@@ -1426,7 +1501,89 @@ impl FunctionCodeGenerator for X64FunctionCode {
         }
 
         let a = self.assembler.as_mut().unwrap();
-        match op {
+
+        let op = match ev {
+            Event::Wasm(x) => x,
+            Event::WasmOwned(ref x) => x,
+            Event::Internal(x) => {
+                match x {
+                    InternalEvent::Breakpoint(callback) => {
+                        a.emit_bkpt();
+                        self.breakpoints
+                            .as_mut()
+                            .unwrap()
+                            .insert(a.get_offset(), callback);
+                    }
+                    InternalEvent::FunctionBegin(_) | InternalEvent::FunctionEnd => {},
+                    InternalEvent::GetInternal(idx) => {
+                        let idx = idx as usize;
+                        assert!(idx < INTERNALS_SIZE);
+
+                        let tmp = self.machine.acquire_temp_gpr().unwrap();
+
+                        // Load `internals` pointer.
+                        a.emit_mov(
+                            Size::S64,
+                            Location::Memory(
+                                Machine::get_vmctx_reg(),
+                                vm::Ctx::offset_internals() as i32,
+                            ),
+                            Location::GPR(tmp),
+                        );
+
+                        let loc = self.machine.acquire_locations(
+                            a,
+                            &[WpType::I64],
+                            false,
+                        )[0];
+                        self.value_stack.push((loc, LocalOrTemp::Temp));
+
+                        // Move internal into the result location.
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            Location::Memory(tmp, (idx * 8) as i32),
+                            loc,
+                        );
+
+                        self.machine.release_temp_gpr(tmp);
+                    }
+                    InternalEvent::SetInternal(idx) => {
+                        let idx = idx as usize;
+                        assert!(idx < INTERNALS_SIZE);
+
+                        let tmp = self.machine.acquire_temp_gpr().unwrap();
+
+                        // Load `internals` pointer.
+                        a.emit_mov(
+                            Size::S64,
+                            Location::Memory(
+                                Machine::get_vmctx_reg(),
+                                vm::Ctx::offset_internals() as i32,
+                            ),
+                            Location::GPR(tmp),
+                        );
+                        let loc = get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
+
+                        // Move internal into storage.
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            Location::Memory(tmp, (idx * 8) as i32),
+                        );
+                        self.machine.release_temp_gpr(tmp);
+                    }
+                    //_ => unimplemented!(),
+                }
+                return Ok(());
+            }
+        };
+        match *op {
             Operator::GetGlobal { global_index } => {
                 let global_index = global_index as usize;
 
@@ -2551,7 +2708,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S32, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f32_int_conv_check(a, &mut self.machine, tmp_in, -1.0, 4294967296.0);
 
                 a.emit_cvttss2si_64(XMMOrMemory::XMM(tmp_in), tmp_out);
@@ -2569,7 +2733,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S32, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f32_int_conv_check(
                     a,
                     &mut self.machine,
@@ -2593,7 +2764,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S32, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f32_int_conv_check(
                     a,
                     &mut self.machine,
@@ -2631,7 +2809,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap(); // xmm2
 
-                a.emit_mov(Size::S32, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S32,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f32_int_conv_check(
                     a,
                     &mut self.machine,
@@ -2679,7 +2864,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S64, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f64_int_conv_check(a, &mut self.machine, tmp_in, -1.0, 4294967296.0);
 
                 a.emit_cvttsd2si_64(XMMOrMemory::XMM(tmp_in), tmp_out);
@@ -2697,16 +2889,28 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S64, loc, Location::XMM(tmp_in));
+                let real_in = match loc {
+                    Location::Imm32(_) | Location::Imm64(_) => {
+                        a.emit_mov(Size::S64, loc, Location::GPR(tmp_out));
+                        a.emit_mov(Size::S64, Location::GPR(tmp_out), Location::XMM(tmp_in));
+                        tmp_in
+                    }
+                    Location::XMM(x) => x,
+                    _ => {
+                        a.emit_mov(Size::S64, loc, Location::XMM(tmp_in));
+                        tmp_in
+                    }
+                };
+
                 Self::emit_f64_int_conv_check(
                     a,
                     &mut self.machine,
-                    tmp_in,
+                    real_in,
                     -2147483649.0,
                     2147483648.0,
                 );
 
-                a.emit_cvttsd2si_32(XMMOrMemory::XMM(tmp_in), tmp_out);
+                a.emit_cvttsd2si_32(XMMOrMemory::XMM(real_in), tmp_out);
                 a.emit_mov(Size::S32, Location::GPR(tmp_out), ret);
 
                 self.machine.release_temp_xmm(tmp_in);
@@ -2721,7 +2925,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap();
 
-                a.emit_mov(Size::S64, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f64_int_conv_check(
                     a,
                     &mut self.machine,
@@ -2745,7 +2956,14 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 let tmp_out = self.machine.acquire_temp_gpr().unwrap();
                 let tmp_in = self.machine.acquire_temp_xmm().unwrap(); // xmm2
 
-                a.emit_mov(Size::S64, loc, Location::XMM(tmp_in));
+                Self::emit_relaxed_binop(
+                    a,
+                    &mut self.machine,
+                    Assembler::emit_mov,
+                    Size::S64,
+                    loc,
+                    Location::XMM(tmp_in),
+                );
                 Self::emit_f64_int_conv_check(
                     a,
                     &mut self.machine,
@@ -3231,33 +3449,23 @@ impl FunctionCodeGenerator for X64FunctionCode {
             Operator::Nop => {}
             Operator::MemorySize { reserved } => {
                 let memory_index = MemoryIndex::new(reserved as usize);
-                let target: usize = match memory_index.local_or_import(module_info) {
-                    LocalOrImport::Local(local_mem_index) => {
-                        let mem_desc = &module_info.memories[local_mem_index];
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => vmcalls::local_dynamic_memory_size as usize,
-                            MemoryType::Static => vmcalls::local_static_memory_size as usize,
-                            MemoryType::SharedStatic => unimplemented!(),
-                        }
-                    }
-                    LocalOrImport::Import(import_mem_index) => {
-                        let mem_desc = &module_info.imported_memories[import_mem_index].1;
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => vmcalls::imported_dynamic_memory_size as usize,
-                            MemoryType::Static => vmcalls::imported_static_memory_size as usize,
-                            MemoryType::SharedStatic => unimplemented!(),
-                        }
-                    }
-                };
+                a.emit_mov(
+                    Size::S64,
+                    Location::Memory(
+                        Machine::get_vmctx_reg(),
+                        vm::Ctx::offset_intrinsics() as i32,
+                    ),
+                    Location::GPR(GPR::RAX),
+                );
+                a.emit_mov(
+                    Size::S64,
+                    Location::Memory(GPR::RAX, vm::Intrinsics::offset_memory_size() as i32),
+                    Location::GPR(GPR::RAX),
+                );
                 Self::emit_call_sysv(
                     a,
                     &mut self.machine,
                     |a| {
-                        a.emit_mov(
-                            Size::S64,
-                            Location::Imm64(target as u64),
-                            Location::GPR(GPR::RAX),
-                        );
                         a.emit_call_location(Location::GPR(GPR::RAX));
                     },
                     ::std::iter::once(Location::Imm32(memory_index.index() as u32)),
@@ -3268,40 +3476,30 @@ impl FunctionCodeGenerator for X64FunctionCode {
             }
             Operator::MemoryGrow { reserved } => {
                 let memory_index = MemoryIndex::new(reserved as usize);
-                let target: usize = match memory_index.local_or_import(module_info) {
-                    LocalOrImport::Local(local_mem_index) => {
-                        let mem_desc = &module_info.memories[local_mem_index];
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => vmcalls::local_dynamic_memory_grow as usize,
-                            MemoryType::Static => vmcalls::local_static_memory_grow as usize,
-                            MemoryType::SharedStatic => unimplemented!(),
-                        }
-                    }
-                    LocalOrImport::Import(import_mem_index) => {
-                        let mem_desc = &module_info.imported_memories[import_mem_index].1;
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => vmcalls::imported_dynamic_memory_grow as usize,
-                            MemoryType::Static => vmcalls::imported_static_memory_grow as usize,
-                            MemoryType::SharedStatic => unimplemented!(),
-                        }
-                    }
-                };
-
                 let (param_pages, param_pages_lot) = self.value_stack.pop().unwrap();
 
                 if param_pages_lot == LocalOrTemp::Temp {
                     self.machine.release_locations_only_regs(&[param_pages]);
                 }
 
+                a.emit_mov(
+                    Size::S64,
+                    Location::Memory(
+                        Machine::get_vmctx_reg(),
+                        vm::Ctx::offset_intrinsics() as i32,
+                    ),
+                    Location::GPR(GPR::RAX),
+                );
+                a.emit_mov(
+                    Size::S64,
+                    Location::Memory(GPR::RAX, vm::Intrinsics::offset_memory_grow() as i32),
+                    Location::GPR(GPR::RAX),
+                );
+
                 Self::emit_call_sysv(
                     a,
                     &mut self.machine,
                     |a| {
-                        a.emit_mov(
-                            Size::S64,
-                            Location::Imm64(target as u64),
-                            Location::GPR(GPR::RAX),
-                        );
                         a.emit_call_location(Location::GPR(GPR::RAX));
                     },
                     ::std::iter::once(Location::Imm32(memory_index.index() as u32))
@@ -3316,7 +3514,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 self.value_stack.push((ret, LocalOrTemp::Temp));
                 a.emit_mov(Size::S64, Location::GPR(GPR::RAX), ret);
             }
-            Operator::I32Load { memarg } => {
+            Operator::I32Load { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I32], false)[0];
@@ -3324,6 +3522,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3341,7 +3540,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::F32Load { memarg } => {
+            Operator::F32Load { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::F32], false)[0];
@@ -3349,6 +3548,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3366,7 +3566,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Load8U { memarg } => {
+            Operator::I32Load8U { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I32], false)[0];
@@ -3374,6 +3574,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3392,7 +3593,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Load8S { memarg } => {
+            Operator::I32Load8S { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I32], false)[0];
@@ -3400,6 +3601,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3418,7 +3620,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Load16U { memarg } => {
+            Operator::I32Load16U { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I32], false)[0];
@@ -3426,6 +3628,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3444,7 +3647,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Load16S { memarg } => {
+            Operator::I32Load16S { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I32], false)[0];
@@ -3452,6 +3655,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3470,7 +3674,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Store { memarg } => {
+            Operator::I32Store { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3478,6 +3682,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3495,7 +3700,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::F32Store { memarg } => {
+            Operator::F32Store { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3503,6 +3708,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3520,7 +3726,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Store8 { memarg } => {
+            Operator::I32Store8 { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3528,6 +3734,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3545,7 +3752,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I32Store16 { memarg } => {
+            Operator::I32Store16 { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3553,6 +3760,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3570,7 +3778,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load { memarg } => {
+            Operator::I64Load { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3578,6 +3786,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3595,7 +3804,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::F64Load { memarg } => {
+            Operator::F64Load { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::F64], false)[0];
@@ -3603,6 +3812,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3620,7 +3830,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load8U { memarg } => {
+            Operator::I64Load8U { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3628,6 +3838,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3646,7 +3857,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load8S { memarg } => {
+            Operator::I64Load8S { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3654,6 +3865,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3672,7 +3884,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load16U { memarg } => {
+            Operator::I64Load16U { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3680,6 +3892,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3698,7 +3911,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load16S { memarg } => {
+            Operator::I64Load16S { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3706,6 +3919,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3724,7 +3938,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load32U { memarg } => {
+            Operator::I64Load32U { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3732,6 +3946,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3755,7 +3970,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Load32S { memarg } => {
+            Operator::I64Load32S { ref memarg } => {
                 let target =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let ret = self.machine.acquire_locations(a, &[WpType::I64], false)[0];
@@ -3763,6 +3978,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target,
@@ -3781,7 +3997,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Store { memarg } => {
+            Operator::I64Store { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3789,6 +4005,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3806,7 +4023,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::F64Store { memarg } => {
+            Operator::F64Store { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3814,6 +4031,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3831,7 +4049,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Store8 { memarg } => {
+            Operator::I64Store8 { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3839,6 +4057,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3856,7 +4075,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Store16 { memarg } => {
+            Operator::I64Store16 { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3864,6 +4083,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3881,7 +4101,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     },
                 );
             }
-            Operator::I64Store32 { memarg } => {
+            Operator::I64Store32 { ref memarg } => {
                 let target_value =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
                 let target_addr =
@@ -3889,6 +4109,7 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 Self::emit_memory_op(
                     module_info,
+                    &self.config,
                     a,
                     &mut self.machine,
                     target_addr,
@@ -3981,11 +4202,12 @@ impl FunctionCodeGenerator for X64FunctionCode {
 
                 a.emit_label(after);
             }
-            Operator::BrTable { table } => {
+            Operator::BrTable { ref table } => {
                 let (targets, default_target) = table.read_table().unwrap();
                 let cond =
                     get_location_released(a, &mut self.machine, self.value_stack.pop().unwrap());
-                let mut table = vec![0usize; targets.len()];
+                let table_label = a.get_label();
+                let mut table: Vec<DynamicLabel> = vec![];
                 let default_br = a.get_label();
                 Self::emit_relaxed_binop(
                     a,
@@ -3997,19 +4219,16 @@ impl FunctionCodeGenerator for X64FunctionCode {
                 );
                 a.emit_jmp(Condition::AboveEqual, default_br);
 
-                a.emit_mov(
-                    Size::S64,
-                    Location::Imm64(table.as_ptr() as usize as u64),
-                    Location::GPR(GPR::RCX),
-                );
+                a.emit_lea_label(table_label, Location::GPR(GPR::RCX));
                 a.emit_mov(Size::S32, cond, Location::GPR(GPR::RDX));
-                a.emit_shl(Size::S32, Location::Imm8(3), Location::GPR(GPR::RDX));
+                a.emit_imul_imm32_gpr64(5, GPR::RDX);
                 a.emit_add(Size::S64, Location::GPR(GPR::RCX), Location::GPR(GPR::RDX));
-                a.emit_jmp_location(Location::Memory(GPR::RDX, 0));
+                a.emit_jmp_location(Location::GPR(GPR::RDX));
 
-                for (i, target) in targets.iter().enumerate() {
-                    let AssemblyOffset(offset) = a.offset();
-                    table[i] = offset;
+                for target in targets.iter() {
+                    let label = a.get_label();
+                    a.emit_label(label);
+                    table.push(label);
                     let frame =
                         &self.control_stack[self.control_stack.len() - 1 - (*target as usize)];
                     if !frame.loop_like && frame.returns.len() > 0 {
@@ -4044,7 +4263,10 @@ impl FunctionCodeGenerator for X64FunctionCode {
                     a.emit_jmp(Condition::None, frame.label);
                 }
 
-                self.br_table_data.as_mut().unwrap().push(table);
+                a.emit_label(table_label);
+                for x in table {
+                    a.emit_jmp(Condition::None, x);
+                }
                 self.unreachable_depth = 1;
             }
             Operator::Drop => {

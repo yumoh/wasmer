@@ -45,6 +45,15 @@ impl Value {
             Value::F64(_) => Type::F64,
         }
     }
+
+    pub fn to_u64(&self) -> u64 {
+        match *self {
+            Value::I32(x) => x as u32 as u64,
+            Value::I64(x) => x as u64,
+            Value::F32(x) => f32::to_bits(x) as u64,
+            Value::F64(x) => f64::to_bits(x),
+        }
+    }
 }
 
 impl From<i32> for Value {
@@ -71,103 +80,149 @@ impl From<f64> for Value {
     }
 }
 
-pub unsafe trait WasmExternType: Copy + Clone
+pub unsafe trait NativeWasmType: Copy + Into<Value>
 where
     Self: Sized,
 {
     const TYPE: Type;
-    fn to_bits(self) -> u64;
-    fn from_bits(n: u64) -> Self;
+    fn from_binary(bits: u64) -> Self;
+    fn to_binary(self) -> u64;
+}
+
+unsafe impl NativeWasmType for i32 {
+    const TYPE: Type = Type::I32;
+    fn from_binary(bits: u64) -> Self {
+        bits as _
+    }
+    fn to_binary(self) -> u64 {
+        self as _
+    }
+}
+unsafe impl NativeWasmType for i64 {
+    const TYPE: Type = Type::I64;
+    fn from_binary(bits: u64) -> Self {
+        bits as _
+    }
+    fn to_binary(self) -> u64 {
+        self as _
+    }
+}
+unsafe impl NativeWasmType for f32 {
+    const TYPE: Type = Type::F32;
+    fn from_binary(bits: u64) -> Self {
+        f32::from_bits(bits as u32)
+    }
+    fn to_binary(self) -> u64 {
+        self.to_bits() as _
+    }
+}
+unsafe impl NativeWasmType for f64 {
+    const TYPE: Type = Type::F64;
+    fn from_binary(bits: u64) -> Self {
+        f64::from_bits(bits)
+    }
+    fn to_binary(self) -> u64 {
+        self.to_bits()
+    }
+}
+
+pub unsafe trait WasmExternType: Copy
+where
+    Self: Sized,
+{
+    type Native: NativeWasmType;
+    fn from_native(native: Self::Native) -> Self;
+    fn to_native(self) -> Self::Native;
 }
 
 unsafe impl WasmExternType for i8 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for u8 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for i16 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for u16 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for i32 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self
     }
 }
 unsafe impl WasmExternType for u32 {
-    const TYPE: Type = Type::I32;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i32;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for i64 {
-    const TYPE: Type = Type::I64;
-    fn to_bits(self) -> u64 {
-        self as u64
+    type Native = i64;
+    fn from_native(native: Self::Native) -> Self {
+        native
     }
-    fn from_bits(n: u64) -> Self {
-        n as _
+    fn to_native(self) -> Self::Native {
+        self
     }
 }
 unsafe impl WasmExternType for u64 {
-    const TYPE: Type = Type::I64;
-    fn to_bits(self) -> u64 {
-        self
+    type Native = i64;
+    fn from_native(native: Self::Native) -> Self {
+        native as _
     }
-    fn from_bits(n: u64) -> Self {
-        n
+    fn to_native(self) -> Self::Native {
+        self as _
     }
 }
 unsafe impl WasmExternType for f32 {
-    const TYPE: Type = Type::F32;
-    fn to_bits(self) -> u64 {
-        self.to_bits() as u64
+    type Native = f32;
+    fn from_native(native: Self::Native) -> Self {
+        native
     }
-    fn from_bits(n: u64) -> Self {
-        f32::from_bits(n as u32)
+    fn to_native(self) -> Self::Native {
+        self
     }
 }
 unsafe impl WasmExternType for f64 {
-    const TYPE: Type = Type::F64;
-    fn to_bits(self) -> u64 {
-        self.to_bits()
+    type Native = f64;
+    fn from_native(native: Self::Native) -> Self {
+        native
     }
-    fn from_bits(n: u64) -> Self {
-        f64::from_bits(n)
+    fn to_native(self) -> Self::Native {
+        self
     }
 }
 
@@ -355,7 +410,7 @@ pub trait LocalImport {
 macro_rules! define_map_index {
     ($ty:ident) => {
         #[derive(Serialize, Deserialize)]
-        #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+        #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $ty (u32);
         impl TypedIndex for $ty {
             #[doc(hidden)]
@@ -469,4 +524,59 @@ where
             LocalOrImport::Local(_) => None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::NativeWasmType;
+    use crate::types::WasmExternType;
+
+    #[test]
+    fn test_native_types_round_trip() {
+        assert_eq!(
+            42i32,
+            i32::from_native(i32::from_binary((42i32).to_native().to_binary()))
+        );
+
+        assert_eq!(
+            -42i32,
+            i32::from_native(i32::from_binary((-42i32).to_native().to_binary()))
+        );
+
+        use std::i64;
+        let xi64 = i64::MAX;
+        assert_eq!(
+            xi64,
+            i64::from_native(i64::from_binary((xi64).to_native().to_binary()))
+        );
+        let yi64 = i64::MIN;
+        assert_eq!(
+            yi64,
+            i64::from_native(i64::from_binary((yi64).to_native().to_binary()))
+        );
+
+        assert_eq!(
+            16.5f32,
+            f32::from_native(f32::from_binary((16.5f32).to_native().to_binary()))
+        );
+
+        assert_eq!(
+            -16.5f32,
+            f32::from_native(f32::from_binary((-16.5f32).to_native().to_binary()))
+        );
+
+        use std::f64;
+        let xf64: f64 = f64::MAX;
+        assert_eq!(
+            xf64,
+            f64::from_native(f64::from_binary((xf64).to_native().to_binary()))
+        );
+
+        let yf64: f64 = f64::MIN;
+        assert_eq!(
+            yf64,
+            f64::from_native(f64::from_binary((yf64).to_native().to_binary()))
+        );
+    }
+
 }

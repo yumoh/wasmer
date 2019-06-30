@@ -1,5 +1,5 @@
 //! Installing signal handlers allows us to handle traps and out-of-bounds memory
-//! accesses that occur when runniing webassembly.
+//! accesses that occur when runniing WebAssembly.
 //!
 //! This code is inspired by: https://github.com/pepyakin/wasmtime/commit/625a2b6c0815b21996e111da51b9664feb174622
 //!
@@ -12,12 +12,16 @@
 use libc::{c_int, c_void, siginfo_t};
 use nix::sys::signal::{
     sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal, SIGBUS, SIGFPE, SIGILL, SIGSEGV,
+    SIGTRAP,
 };
 use std::any::Any;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::HashMap;
 use std::ptr;
+use std::sync::Arc;
 use std::sync::Once;
-use wasmer_runtime_core::error::{RuntimeError, RuntimeResult};
+use wasmer_runtime_core::codegen::BkptInfo;
+use wasmer_runtime_core::typed_func::WasmTrapInfo;
 
 extern "C" fn signal_trap_handler(
     signum: ::nix::libc::c_int,
@@ -25,6 +29,20 @@ extern "C" fn signal_trap_handler(
     ucontext: *mut c_void,
 ) {
     unsafe {
+        match Signal::from_c_int(signum) {
+            Ok(SIGTRAP) => {
+                let (_, ip) = get_faulting_addr_and_ip(siginfo as _, ucontext);
+                let bkpt_map = BKPT_MAP.with(|x| x.borrow().last().map(|x| x.clone()));
+                if let Some(bkpt_map) = bkpt_map {
+                    if let Some(ref x) = bkpt_map.get(&(ip as usize)) {
+                        (x)(BkptInfo { throw: throw });
+                        return;
+                    }
+                }
+            }
+            _ => {}
+        }
+
         do_unwind(signum, siginfo as _, ucontext);
     }
 }
@@ -44,6 +62,7 @@ pub unsafe fn install_sighandler() {
     sigaction(SIGILL, &sa).unwrap();
     sigaction(SIGSEGV, &sa).unwrap();
     sigaction(SIGBUS, &sa).unwrap();
+    sigaction(SIGTRAP, &sa).unwrap();
 }
 
 const SETJMP_BUFFER_LEN: usize = 27;
@@ -54,6 +73,7 @@ thread_local! {
     pub static CAUGHT_ADDRESSES: Cell<(*const c_void, *const c_void)> = Cell::new((ptr::null(), ptr::null()));
     pub static CURRENT_EXECUTABLE_BUFFER: Cell<*const c_void> = Cell::new(ptr::null());
     pub static TRAP_EARLY_DATA: Cell<Option<Box<dyn Any>>> = Cell::new(None);
+    pub static BKPT_MAP: RefCell<Vec<Arc<HashMap<usize, Box<Fn(BkptInfo) + Send + Sync + 'static>>>>> = RefCell::new(Vec::new());
 }
 
 pub unsafe fn trigger_trap() -> ! {
@@ -62,7 +82,12 @@ pub unsafe fn trigger_trap() -> ! {
     longjmp(jmp_buf as *mut c_void, 0)
 }
 
-pub fn call_protected<T>(f: impl FnOnce() -> T) -> RuntimeResult<T> {
+pub enum CallProtError {
+    Trap(WasmTrapInfo),
+    Error(Box<dyn Any>),
+}
+
+pub fn call_protected<T>(f: impl FnOnce() -> T) -> Result<T, CallProtError> {
     unsafe {
         let jmp_buf = SETJMP_BUFFER.with(|buf| buf.get());
         let prev_jmp_buf = *jmp_buf;
@@ -76,23 +101,24 @@ pub fn call_protected<T>(f: impl FnOnce() -> T) -> RuntimeResult<T> {
             *jmp_buf = prev_jmp_buf;
 
             if let Some(data) = TRAP_EARLY_DATA.with(|cell| cell.replace(None)) {
-                Err(RuntimeError::Panic { data })
+                Err(CallProtError::Error(data))
             } else {
-                let (faulting_addr, _inst_ptr) = CAUGHT_ADDRESSES.with(|cell| cell.get());
+                // let (faulting_addr, _inst_ptr) = CAUGHT_ADDRESSES.with(|cell| cell.get());
 
-                let signal = match Signal::from_c_int(signum) {
-                    Ok(SIGFPE) => "floating-point exception",
-                    Ok(SIGILL) => "illegal instruction",
-                    Ok(SIGSEGV) => "segmentation violation",
-                    Ok(SIGBUS) => "bus error",
-                    Err(_) => "error while getting the Signal",
-                    _ => "unkown trapped signal",
-                };
-                // When the trap-handler is fully implemented, this will return more information.
-                Err(RuntimeError::Trap {
-                    msg: format!("unknown trap at {:p} - {}", faulting_addr, signal).into(),
-                }
-                .into())
+                // let signal = match Signal::from_c_int(signum) {
+                //     Ok(SIGFPE) => "floating-point exception",
+                //     Ok(SIGILL) => "illegal instruction",
+                //     Ok(SIGSEGV) => "segmentation violation",
+                //     Ok(SIGBUS) => "bus error",
+                //     Err(_) => "error while getting the Signal",
+                //     _ => "unknown trapped signal",
+                // };
+                // // When the trap-handler is fully implemented, this will return more information.
+                // Err(RuntimeError::Trap {
+                //     msg: format!("unknown trap at {:p} - {}", faulting_addr, signal).into(),
+                // }
+                // .into())
+                Err(CallProtError::Trap(WasmTrapInfo::Unknown))
             }
         } else {
             let ret = f(); // TODO: Switch stack?
@@ -100,6 +126,15 @@ pub fn call_protected<T>(f: impl FnOnce() -> T) -> RuntimeResult<T> {
             Ok(ret)
         }
     }
+}
+
+pub unsafe fn throw(payload: Box<dyn Any>) -> ! {
+    let jmp_buf = SETJMP_BUFFER.with(|buf| buf.get());
+    if *jmp_buf == [0; SETJMP_BUFFER_LEN] {
+        ::std::process::abort();
+    }
+    TRAP_EARLY_DATA.with(|cell| cell.replace(Some(payload)));
+    longjmp(jmp_buf as *mut ::nix::libc::c_void, 0xffff);
 }
 
 /// Unwinds to last protected_call.
