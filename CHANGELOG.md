@@ -5,7 +5,23 @@ All PRs to the Wasmer repository must add to this file.
 Blocks of changes will separated by version increments.
 
 ## **[Unreleased]**
+- [#515](https://github.com/wasmerio/wasmer/pull/515) Improved Emscripten dyncalls
+- [#513](https://github.com/wasmerio/wasmer/pull/513) Fix emscripten lseek implementation.
+- [#510](https://github.com/wasmerio/wasmer/pull/510) Simplify construction of floating point constants in LLVM backend. Fix LLVM assertion failure due to definition of %ctx.
 
+## 0.5.1 - 2019-06-24
+- [#508](https://github.com/wasmerio/wasmer/pull/508) Update wapm version, includes bug fixes
+
+## 0.5.0 - 2019-06-17
+
+- [#471](https://github.com/wasmerio/wasmer/pull/471) Added missing functions to run Python. Improved Emscripten bindings
+- [#494](https://github.com/wasmerio/wasmer/pull/494) Remove deprecated type aliases from libc in the runtime C API
+- [#493](https://github.com/wasmerio/wasmer/pull/493) `wasmer_module_instantiate` has better error messages in the runtime C API
+- [#474](https://github.com/wasmerio/wasmer/pull/474) Set the install name of the dylib to `@rpath`
+- [#490](https://github.com/wasmerio/wasmer/pull/490) Add MiddlewareChain and StreamingCompiler to runtime
+- [#487](https://github.com/wasmerio/wasmer/pull/487) Fix stack offset check in singlepass backend 
+- [#450](https://github.com/wasmerio/wasmer/pull/450) Added Metering
+- [#481](https://github.com/wasmerio/wasmer/pull/481) Added context trampoline into runtime
 - [#484](https://github.com/wasmerio/wasmer/pull/484) Fix bugs in emscripten socket syscalls
 - [#476](https://github.com/wasmerio/wasmer/pull/476) Fix bug with wasi::environ_get, fix off by one error in wasi::environ_sizes_get
 - [#470](https://github.com/wasmerio/wasmer/pull/470) Add mapdir support to Emscripten, implement getdents for Unix
