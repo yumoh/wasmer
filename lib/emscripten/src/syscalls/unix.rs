@@ -71,10 +71,11 @@ use libc::{
     EINVAL,
     // sockaddr_in,
     FIOCLEX,
-    // FIONBIO,
+    FIONBIO,
     F_GETFD,
     F_SETFD,
     SOL_SOCKET,
+    TIOCGPGRP,
     TIOCGWINSZ,
     TIOCSPGRP,
     // TCGETS,
@@ -88,10 +89,11 @@ const TCSETSW: u64 = 0x5403;
 // `libc` constants as provided by `emscripten`. Maybe move to own file?
 const WASM_FIONBIO: u32 = 0x5421;
 const WASM_FIOCLEX: u32 = 0x5451;
-const WASM_TIOCSPGRP: u32 = 0x5410;
-const WASM_TIOCGWINSZ: u32 = 0x5413;
 const WASM_TCGETS: u32 = 0x5401;
 const WASM_TCSETSW: u32 = 0x5403;
+const WASM_TIOCGPGRP: u32 = 0x540F;
+const WASM_TIOCGWINSZ: u32 = 0x5413;
+const WASM_TIOCSPGRP: u32 = 0x5410;
 
 // Based on @syrusakbary sugerence at
 // https://github.com/wasmerio/wasmer/pull/532#discussion_r300837800
@@ -99,10 +101,11 @@ fn translate_ioctl(wasm_ioctl: u32) -> c_ulong {
     match wasm_ioctl {
         WASM_FIOCLEX => FIOCLEX,
         WASM_FIONBIO => FIONBIO,
-        WASM_TIOCGWINSZ => TIOCGWINSZ,
-        WASM_TIOCSPGRP => TIOCSPGRP,
         WASM_TCGETS => TCGETS,
         WASM_TCSETSW => TCSETSW,
+        WASM_TIOCGPGRP => TIOCGPGRP,
+        WASM_TIOCGWINSZ => TIOCGWINSZ,
+        WASM_TIOCSPGRP => TIOCSPGRP,
 
         _otherwise => {
             unimplemented!("The ioctl {} is not yet implemented", wasm_ioctl);
@@ -460,8 +463,8 @@ pub fn ___syscall54(ctx: &mut Ctx, _which: c_int, mut varargs: VarArgs) -> c_int
 
     // Got the equivalents here: https://code.woboq.org/linux/linux/include/uapi/asm-generic/ioctls.h.html
     match request {
-        WASM_FIOCLEX | WASM_FIONBIO | WASM_TIOCGWINSZ | WASM_TIOCSPGRP | WASM_TCGETS
-        | WASM_TCSETSW => {
+        WASM_FIOCLEX | WASM_FIONBIO | WASM_TIOCGWINSZ | WASM_TIOCGPGRP | WASM_TIOCSPGRP
+        | WASM_TCGETS | WASM_TCSETSW => {
             let argp: u32 = varargs.get(ctx);
             let argp_ptr = emscripten_memory_pointer!(ctx.memory(0), argp) as *mut c_void;
             let translated_request = translate_ioctl(request);
