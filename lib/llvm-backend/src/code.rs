@@ -101,6 +101,40 @@ fn trap_if_not_representable_as_int(
     builder.position_at_end(&continue_block);
 }
 
+fn saturate_if_not_representable_as_int(
+    builder: &Builder,
+    lower_bound: f64,
+    upper_bound: f64,
+    value: FloatValue,
+) -> FloatValue {
+    let float_ty = value.get_type();
+
+    let zero = float_ty.const_zero();
+    let lower_bound = float_ty.const_float(lower_bound);
+    let upper_bound = float_ty.const_float(upper_bound);
+
+    let is_nan_cmp = builder.build_float_compare(FloatPredicate::UNE, value, value, "is_nan");
+    let above_upper_bound_cmp =
+        builder.build_float_compare(FloatPredicate::OGT, value, upper_bound, "above_upper_bound");
+    let below_lower_bound_cmp =
+        builder.build_float_compare(FloatPredicate::OLT, value, lower_bound, "below_lower_bound");
+    let value = builder.build_select(is_nan_cmp, zero, value, "nan_to_zero");
+    let value = builder.build_select(
+        above_upper_bound_cmp,
+        upper_bound,
+        *value.as_float_value(),
+        "saturate_upper_bound",
+    );
+    let value = builder.build_select(
+        below_lower_bound_cmp,
+        lower_bound,
+        *value.as_float_value(),
+        "saturate_lower_bound",
+    );
+
+    value.into_float_value()
+}
+
 fn trap_if_zero_or_overflow(
     builder: &Builder,
     intrinsics: &Intrinsics,
@@ -1685,8 +1719,18 @@ impl FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator {
                     builder.build_float_to_signed_int(v1, intrinsics.i32_ty, &state.var_name());
                 state.push1(res);
             }
-            Operator::I32TruncSSatF32 | Operator::I32TruncSSatF64 => {
+            Operator::I32TruncSSatF32 => {
                 let v1 = state.pop1()?.into_float_value();
+                let v1 =
+                    saturate_if_not_representable_as_int(builder, -2147483904.0, 2147483648.0, v1);
+                let res =
+                    builder.build_float_to_signed_int(v1, intrinsics.i32_ty, &state.var_name());
+                state.push1(res);
+            }
+            Operator::I32TruncSSatF64 => {
+                let v1 = state.pop1()?.into_float_value();
+                let v1 =
+                    saturate_if_not_representable_as_int(builder, -2147483649.0, 2147483648.0, v1);
                 let res =
                     builder.build_float_to_signed_int(v1, intrinsics.i32_ty, &state.var_name());
                 state.push1(res);
@@ -1721,28 +1765,31 @@ impl FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator {
                     builder.build_float_to_signed_int(v1, intrinsics.i64_ty, &state.var_name());
                 state.push1(res);
             }
-            Operator::I64TruncSSatF32 | Operator::I64TruncSSatF64 => {
+            Operator::I64TruncSSatF32 => {
                 let v1 = state.pop1()?.into_float_value();
+                let v1 = saturate_if_not_representable_as_int(
+                    builder,
+                    -9223373136366403584.0,
+                    9223372036854775808.0,
+                    v1,
+                );
                 let res =
                     builder.build_float_to_signed_int(v1, intrinsics.i64_ty, &state.var_name());
                 state.push1(res);
             }
-            Operator::I32TruncUF32 => {
+            Operator::I64TruncSSatF64 => {
                 let v1 = state.pop1()?.into_float_value();
-                trap_if_not_representable_as_int(
+                let v1 = saturate_if_not_representable_as_int(
                     builder,
-                    intrinsics,
-                    context,
-                    &function,
-                    -1.0,
-                    4294967296.0,
+                    -9223372036854777856.0,
+                    9223372036854775808.0,
                     v1,
                 );
                 let res =
-                    builder.build_float_to_unsigned_int(v1, intrinsics.i32_ty, &state.var_name());
+                    builder.build_float_to_signed_int(v1, intrinsics.i64_ty, &state.var_name());
                 state.push1(res);
             }
-            Operator::I32TruncUF64 => {
+            Operator::I32TruncUF32 | Operator::I32TruncUF64 => {
                 let v1 = state.pop1()?.into_float_value();
                 trap_if_not_representable_as_int(
                     builder,
@@ -1759,6 +1806,7 @@ impl FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator {
             }
             Operator::I32TruncUSatF32 | Operator::I32TruncUSatF64 => {
                 let v1 = state.pop1()?.into_float_value();
+                let v1 = saturate_if_not_representable_as_int(builder, -1.0, 4294967296.0, v1);
                 let res =
                     builder.build_float_to_unsigned_int(v1, intrinsics.i32_ty, &state.var_name());
                 state.push1(res);
@@ -1795,6 +1843,8 @@ impl FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator {
             }
             Operator::I64TruncUSatF32 | Operator::I64TruncUSatF64 => {
                 let v1 = state.pop1()?.into_float_value();
+                let v1 =
+                    saturate_if_not_representable_as_int(builder, -1.0, 18446744073709551616.0, v1);
                 let res =
                     builder.build_float_to_unsigned_int(v1, intrinsics.i64_ty, &state.var_name());
                 state.push1(res);
