@@ -511,6 +511,7 @@ impl TypedIndex for SigIndex {
     }
 }
 
+#[derive(Debug)]
 pub enum LocalOrImport<T>
 where
     T: LocalImport,
