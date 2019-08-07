@@ -4503,7 +4503,8 @@ impl ModuleCodeGenerator<LLVMFunctionCodeGenerator, LLVMBackend, CodegenError>
         let intrinsics = Intrinsics::declare(&module, &context);
 
         let personality_func = module.add_function(
-            "__gxx_personality_v0",
+            // "__gxx_personality_v0",
+            "__CxxFrameHandler3",
             intrinsics.i32_ty.fn_type(&[], false),
             Some(Linkage::External),
         );
