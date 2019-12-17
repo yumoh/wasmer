@@ -279,6 +279,7 @@ mod tests {
         let mut features = wabt::Features::new();
         features.enable_simd();
         features.enable_threads();
+        features.enable_multi_value();
         features.enable_sign_extension();
         features.enable_sat_float_to_int();
         let mut parser: ScriptParser =
@@ -325,6 +326,7 @@ mod tests {
                             features: Features {
                                 simd: true,
                                 threads: true,
+                                multi_value: true,
                             },
                             ..Default::default()
                         };
@@ -763,6 +765,7 @@ mod tests {
                             features: Features {
                                 simd: true,
                                 threads: true,
+                                multi_value: true,
                             },
                             ..Default::default()
                         };
@@ -815,6 +818,7 @@ mod tests {
                             features: Features {
                                 simd: true,
                                 threads: true,
+                                multi_value: true,
                             },
                             ..Default::default()
                         };
@@ -866,6 +870,7 @@ mod tests {
                         features: Features {
                             simd: true,
                             threads: true,
+                            multi_value: true,
                         },
                         ..Default::default()
                     };
@@ -961,6 +966,7 @@ mod tests {
                             features: Features {
                                 simd: true,
                                 threads: true,
+                                multi_value: true,
                             },
                             ..Default::default()
                         };
