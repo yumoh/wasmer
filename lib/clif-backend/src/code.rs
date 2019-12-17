@@ -24,6 +24,7 @@ use wasmer_runtime_core::{
     codegen::*,
     memory::MemoryType,
     module::{ModuleInfo, ModuleInner},
+    parse::type_to_wp_type,
     structures::{Map, TypedIndex},
     types::{
         FuncIndex, FuncSig, GlobalIndex, LocalFuncIndex, LocalOrImport, MemoryIndex, SigIndex,
@@ -76,6 +77,19 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
     ) -> Result<&mut CraneliftFunctionCodeGenerator, CodegenError> {
         // define_function_body(
 
+        // TODO: This only needs to happen once, not once per function.
+        let mut module_state = ModuleTranslationState::new();
+        for ty in &module_info.read().unwrap().signatures {
+            let params = ty.1.params().iter().cloned().map(type_to_wp_type).collect();
+            let returns =
+                ty.1.returns()
+                    .iter()
+                    .cloned()
+                    .map(type_to_wp_type)
+                    .collect();
+            module_state.wasm_types.push((params, returns));
+        }
+
         let func_translator = FuncTranslator::new();
 
         let func_index = LocalFuncIndex::new(self.functions.len());
@@ -104,6 +118,7 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
                 clif_signatures: self.clif_signatures.clone(),
             },
             loc,
+            module_state,
         };
 
         let generate_debug_info = module_info.read().unwrap().generate_debug_info;
@@ -258,6 +273,7 @@ pub struct CraneliftFunctionCodeGenerator {
     func_env: FunctionEnvironment,
     /// Where the function lives in the Wasm module as a span of bytes
     loc: WasmSpan,
+    module_state: ModuleTranslationState,
 }
 
 pub struct FunctionEnvironment {
@@ -1206,7 +1222,7 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
         let module_state = ModuleTranslationState::new();
         let func_state = &mut self.func_translator.state;
         translate_operator(
-            &module_state,
+            &self.module_state,
             op,
             &mut builder,
             func_state,
