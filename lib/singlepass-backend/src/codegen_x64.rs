@@ -2479,9 +2479,9 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             label: a.get_label(),
             loop_like: false,
             if_else: IfElseState::None,
-            params: SmallVec::new(),
+            params: smallvec![],
             returns: self.returns.clone(),
-            return_slots: SmallVec::new(),
+            return_slots: smallvec![],
             value_stack_depth: 0,
             state: self.machine.state.clone(),
             state_diff_id,
@@ -6254,17 +6254,19 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 self.machine.release_locations_only_stack(a, &params);
 
-                if return_types.len() > 0 {
+                let mut seq: Vec<Location> = vec![];
+                seq.extend([Location::GPR(GPR::RAX), Location::GPR(GPR::RDX), Location::GPR(GPR::RCX)].iter().cloned());
+                for i in 0..return_types.len() {
                     let ret = self.machine.acquire_locations(
                         a,
                         &[(
-                            return_types[0],
+                            return_types[i],
                             MachineValue::WasmStack(self.value_stack.len()),
                         )],
                         false,
                     )[0];
                     self.value_stack.push(ret);
-                    a.emit_mov(Size::S64, Location::GPR(GPR::RAX), ret);
+                    a.emit_mov(Size::S64, seq[i], ret);
                 }
             }
             Operator::CallIndirect { index, table_index } => {
@@ -6393,17 +6395,19 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 self.machine.release_locations_only_stack(a, &params);
 
-                if return_types.len() > 0 {
+                let mut seq: Vec<Location> = vec![];
+                seq.extend([Location::GPR(GPR::RAX), Location::GPR(GPR::RDX), Location::GPR(GPR::RCX)].iter().cloned());
+                for i in 0..return_types.len() {
                     let ret = self.machine.acquire_locations(
                         a,
                         &[(
-                            return_types[0],
+                            return_types[i],
                             MachineValue::WasmStack(self.value_stack.len()),
                         )],
                         false,
                     )[0];
                     self.value_stack.push(ret);
-                    a.emit_mov(Size::S64, Location::GPR(GPR::RAX), ret);
+                    a.emit_mov(Size::S64, seq[i], ret);
                 }
             }
             Operator::If { ty } => {
@@ -6446,7 +6450,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                                     .iter()
                                     .cloned()
                                     .map(type_to_wp_type)
-                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
                                     .collect::<Vec<(WpType, MachineValue)>>()
                                     .as_slice(),
                                 false,
@@ -6475,16 +6479,17 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             Operator::Else => {
                 let mut frame = self.control_stack.last_mut().unwrap();
 
-                if !was_unreachable && frame.returns.len() > 0 {
-                    let loc = *self.value_stack.last().unwrap();
-                    Self::emit_relaxed_binop(
-                        a,
-                        &mut self.machine,
-                        Assembler::emit_mov,
-                        Size::S64,
-                        loc,
-                        Location::GPR(GPR::RAX),
-                    );
+                if !was_unreachable {
+                    for (&slot, &loc) in frame.return_slots.iter().rev().zip(self.value_stack.iter().rev()) {
+                      Self::emit_relaxed_binop(
+                          a,
+                          &mut self.machine,
+                          Assembler::emit_mov,
+                          Size::S64,
+                          loc,
+                          slot,
+                      );
+                    }
                 }
 
                 let released: &[Location] = &self.value_stack[frame.value_stack_depth..];
@@ -6588,7 +6593,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                                     .iter()
                                     .cloned()
                                     .map(type_to_wp_type)
-                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
                                     .collect::<Vec<(WpType, MachineValue)>>()
                                     .as_slice(),
                                 false,
@@ -6603,6 +6608,8 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                         &mut self.control_stack,
                     ),
                 };
+                dbg!(&self.value_stack);
+                dbg!(&frame.value_stack_depth);
                 self.control_stack.push(frame);
             }
             Operator::Loop { ty } => {
@@ -6644,7 +6651,7 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                                     .iter()
                                     .cloned()
                                     .map(type_to_wp_type)
-                                    .zip(iter::repeat(MachineValue::Undefined))
+                                    .zip(iter::repeat(MachineValue::ReturnSlot))
                                     .collect::<Vec<(WpType, MachineValue)>>()
                                     .as_slice(),
                                 false,
@@ -7533,20 +7540,14 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             }
             Operator::Return => {
                 let frame = &self.control_stack[0];
-                if frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("Return: incorrect frame.returns"),
-                        });
-                    }
-                    let loc = *self.value_stack.last().unwrap();
+                for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
                     Self::emit_relaxed_binop(
                         a,
                         &mut self.machine,
                         Assembler::emit_mov,
                         Size::S64,
                         loc,
-                        Location::GPR(GPR::RAX),
+                        slot,
                     );
                 }
                 let released = &self.value_stack[frame.value_stack_depth..];
@@ -7557,14 +7558,10 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             Operator::Br { relative_depth } => {
                 let frame =
                     &self.control_stack[self.control_stack.len() - 1 - (relative_depth as usize)];
-                if !frame.loop_like && frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("Br: incorrect frame.returns"),
-                        });
+                if !frame.loop_like {
+                    for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter().rev()) {
+                        a.emit_mov(Size::S64, loc, slot);
                     }
-                    let loc = *self.value_stack.last().unwrap();
-                    a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                 }
                 let released = &self.value_stack[frame.value_stack_depth..];
                 self.machine.release_locations_keep_state(a, released);
@@ -7587,14 +7584,11 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
 
                 let frame =
                     &self.control_stack[self.control_stack.len() - 1 - (relative_depth as usize)];
-                if !frame.loop_like && frame.returns.len() > 0 {
-                    if frame.returns.len() != 1 {
-                        return Err(CodegenError {
-                            message: format!("BrIf: incorrect frame.returns"),
-                        });
+                if !frame.loop_like {
+                    for &slot in frame.return_slots.iter() {
+                        let loc = *self.value_stack.last().unwrap();
+                        a.emit_mov(Size::S64, loc, slot);
                     }
-                    let loc = *self.value_stack.last().unwrap();
-                    a.emit_mov(Size::S64, loc, Location::GPR(GPR::RAX));
                 }
                 let released = &self.value_stack[frame.value_stack_depth..];
                 self.machine.release_locations_keep_state(a, released);
@@ -7682,16 +7676,19 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
             Operator::End => {
                 let frame = self.control_stack.pop().unwrap();
 
-                if !was_unreachable && frame.returns.len() > 0 {
-                    let loc = *self.value_stack.last().unwrap();
-                    Self::emit_relaxed_binop(
-                        a,
-                        &mut self.machine,
-                        Assembler::emit_mov,
-                        Size::S64,
-                        loc,
-                        Location::GPR(GPR::RAX),
-                    );
+                if !was_unreachable {
+                    dbg!(&self.value_stack);
+                    dbg!(&frame.value_stack_depth);
+                    for (&slot, &loc) in frame.return_slots.iter().zip(self.value_stack.iter()) {
+                        Self::emit_relaxed_binop(
+                            a,
+                            &mut self.machine,
+                            Assembler::emit_mov,
+                            Size::S64,
+                            loc,
+                            slot,
+                        );
+                    }
                 }
 
                 if self.control_stack.len() == 0 {
@@ -7701,6 +7698,8 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                     a.emit_pop(Size::S64, Location::GPR(GPR::RBP));
                     a.emit_ret();
                 } else {
+                    dbg!(&self.value_stack);
+                    dbg!(&frame.value_stack_depth);
                     let released = &self.value_stack[frame.value_stack_depth..];
                     self.machine.release_locations(a, released);
                     self.value_stack.truncate(frame.value_stack_depth);
@@ -7713,21 +7712,16 @@ impl FunctionCodeGenerator<CodegenError> for X64FunctionCode {
                         a.emit_label(label);
                     }
 
-                    if frame.returns.len() > 0 {
-                        if frame.returns.len() != 1 {
-                            return Err(CodegenError {
-                                message: format!("End: incorrect frame.returns"),
-                            });
-                        }
+                    for (i, &slot) in frame.return_slots.iter().enumerate() {
                         let loc = self.machine.acquire_locations(
                             a,
                             &[(
-                                frame.returns[0],
+                                frame.returns[i],
                                 MachineValue::WasmStack(self.value_stack.len()),
                             )],
                             false,
                         )[0];
-                        a.emit_mov(Size::S64, Location::GPR(GPR::RAX), loc);
+                        a.emit_mov(Size::S64, slot, loc);
                         self.value_stack.push(loc);
                     }
                 }
