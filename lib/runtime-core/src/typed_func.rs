@@ -36,7 +36,9 @@ pub type Invoke = unsafe extern "C" fn(
     vmctx: *mut vm::Ctx,
     func: NonNull<vm::Func>,
     args: *const u64,
+    args_len: usize,
     rets: *mut u64,
+    rets_len: usize,
     error_out: *mut Option<Box<dyn Any + Send>>,
     extra: Option<NonNull<c_void>>,
 ) -> bool;
@@ -522,7 +524,9 @@ macro_rules! impl_traits {
                     ctx,
                     f,
                     args.as_ptr(),
+                    args.len(),
                     rets.as_mut().as_mut_ptr(),
+                    rets.as_mut().len(),
                     &mut error_out,
                     wasm.invoke_env
                 ) {

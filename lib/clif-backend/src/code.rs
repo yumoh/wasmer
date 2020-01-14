@@ -1219,7 +1219,6 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
         );
         builder.func.collect_debug_info();
         builder.set_srcloc(ir::SourceLoc::new(source_loc));
-        let module_state = ModuleTranslationState::new();
         let func_state = &mut self.func_translator.state;
         translate_operator(
             &self.module_state,

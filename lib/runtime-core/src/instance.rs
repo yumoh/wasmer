@@ -680,7 +680,9 @@ pub(crate) fn call_func_with_index_inner(
             ctx_ptr,
             func_ptr,
             raw_args.as_ptr(),
+            raw_args.len(),
             result_space,
+            num_results,
             &mut error_out,
             invoke_env,
         );

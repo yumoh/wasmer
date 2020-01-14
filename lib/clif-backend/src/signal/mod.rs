@@ -62,7 +62,9 @@ impl RunnableModule for Caller {
             ctx: *mut vm::Ctx,
             func: NonNull<vm::Func>,
             args: *const u64,
+            _args_len: usize,
             rets: *mut u64,
+            _rets_len: usize,
             error_out: *mut Option<Box<dyn Any + Send>>,
             invoke_env: Option<NonNull<c_void>>,
         ) -> bool {
