@@ -545,8 +545,7 @@ impl Ctx {
 /// `typed_func` module within the `wrap` functions, to wrap imported
 /// functions.
 #[repr(transparent)]
-pub struct Func(pub(self) *mut c_void);
-
+pub struct Func(pub(crate) *mut c_void);
 /// Represents a function environment pointer, like a captured
 /// environment of a closure. It is mostly used in the `typed_func`
 /// module within the `wrap` functions, to wrap imported functions.

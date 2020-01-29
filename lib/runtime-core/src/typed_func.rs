@@ -4,7 +4,7 @@ use crate::{
     error::RuntimeError,
     export::{Context, Export, FuncPointer},
     import::IsExport,
-    types::{FuncSig, NativeWasmType, Type, WasmExternType},
+    types::{FuncSig, NativeWasmType, Type, Value, WasmExternType},
     vm,
 };
 use std::{
@@ -281,6 +281,86 @@ where
             _phantom: PhantomData,
         }
     }
+
+    /// Creates a polymorphic function
+    pub fn new_polymorphic<F>(signature: Arc<FuncSig>, func: F) -> Func<'a, Args, Rets, Host>
+    where
+        F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
+    {
+        
+        unsafe extern "C" fn wrap_inner<
+            F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
+        >(
+            _cif: &libffi::low::ffi_cif,
+            _result: &mut u64,
+            args: *const *const c_void,
+            _userdata: &F,
+        ) {
+            let args: *const &u64 = mem::transmute(args);
+            let arg1 = **args.offset(0);
+            let arg2 = **args.offset(1);
+            // let args: *const Value = mem::transmute(args);
+            // let args = std::slice::from_raw_parts(args, *args);
+
+            println!("{:?} {:?}", arg1, arg2);
+            unimplemented!("UNIMPLEMENTED");
+            // let args: *const Value = mem::transmute(args);
+            // let args = std::slice::from_raw_parts(args, *args);
+            // println!("{:?}", args);
+            // unimplemented!("UNIMPLEMENTED");
+            // TODO: results and errors.
+            // func(vmctx, args);
+        }
+
+        fn wasm_ty_to_libffi_ty(ty: &Type) -> libffi::middle::Type {
+            match ty {
+                Type::I32 => libffi::middle::Type::u32(),
+                Type::I64 => libffi::middle::Type::u64(),
+                Type::F32 => libffi::middle::Type::f32(),
+                Type::F64 => libffi::middle::Type::f64(),
+                Type::V128 => libffi::middle::Type::structure(vec![
+                    libffi::middle::Type::u64(),
+                    libffi::middle::Type::u64(),
+                ]),
+            }
+        }
+
+        let mut builder = libffi::middle::Builder::new();
+        for param in signature.params() {
+            builder = builder.arg(wasm_ty_to_libffi_ty(param));
+        }
+        match signature.returns().len() {
+            0 => {}
+            1 => {
+                builder = builder.res(wasm_ty_to_libffi_ty(&signature.returns()[0]));
+            }
+            _ => {
+                let returns: Vec<libffi::middle::Type> = signature
+                        .returns()
+                        .iter()
+                        .map(wasm_ty_to_libffi_ty)
+                        .collect();
+                builder = builder.res(libffi::middle::Type::structure(
+                    returns
+                ));
+            }
+        };
+        let closure = builder.into_closure(wrap_inner, &func);
+
+        let func_ptr: *const vm::Func = unsafe { mem::transmute(closure.code_ptr()) } ; 
+        let func = NonNull::new(func_ptr as _).unwrap();
+        let func_env = None;
+
+        Func {
+            inner: Host(()),
+            func,
+            func_env,
+            vmctx: ptr::null_mut(),
+            _phantom: PhantomData,
+        }
+    }
+
+
 }
 
 impl<'a, Args, Rets, Inner> Func<'a, Args, Rets, Inner>
@@ -835,4 +915,33 @@ mod tests {
             },
         };
     }
+
+    #[test]
+    fn test_func_new_call() {
+        fn foo(a: i32, b: i32) -> i32 {
+            a+b
+        }
+
+        let f = Func::new(foo);
+
+        let function = unsafe {
+            std::mem::transmute::<*mut c_void, fn(i32, i32) -> i32>(f.func.as_ref().0)
+        };
+        function(1, 2);
+    }
+
+    // Here's the test for the polymorphic call
+    // #[test]
+    // fn test_func_polymorphic_call() {
+    //     let signature = Arc::new(FuncSig::new(vec![Type::I32, Type::I32], vec![Type::I32]));
+    //     let f: Func<(), (), Host> = Func::new_polymorphic(signature, |_ctx, _values| {
+    //         println!("POLIMORPHIC CALL");
+    //         return vec![];
+    //     });
+    //     let function = unsafe {
+    //         std::mem::transmute::<*mut c_void, fn(i32, i32) -> i32>(f.func.as_ref().0)
+    //     };
+    //     function(1, 2);
+    // }
+
 }
