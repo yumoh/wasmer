@@ -291,9 +291,10 @@ where
     where
         F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
     {
-        extern "C" fn variadic_func(vmctx: &mut vm::Ctx, mut _args: va_list::VaList) -> i32 {
+        extern "C" fn variadic_func<FN>(vmctx: &mut vm::Ctx, mut _args: va_list::VaList) -> (i32, i32, i32) where
+        FN: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value> {
             println!("asdfasfasfd");
-            let self_pointer = variadic_func as *const vm::Func;
+            let self_pointer = variadic_func::<FN> as *const vm::Func;
             // Get the collection of imported functions.
             let vm_imported_functions = unsafe { &(*vmctx.import_backing).vm_functions };
 
@@ -309,6 +310,7 @@ where
                 })
                 .expect("Import backing is not well-formed, cannot find `func_ctx`.");
             let func_ctx = unsafe { func_ctx.as_mut() };
+            let func_env = func_ctx.func_env;
 
             // for param in signature.params() {
             //     match param {
@@ -320,8 +322,26 @@ where
             //     }
             //     param = builder.arg(wasm_ty_to_libffi_ty(param));
             // }
-            2
-            // let values = func(ctx, vec![]);
+            // 2
+            // let f: &FN = unsafe { &*(func_env as *const FN) };
+            let func: &FN = match func_env {
+                // The imported function is a regular
+                // function, a closure without a captured
+                // environment, or a closure with a captured
+                // environment.
+                Some(func_env) => unsafe {
+                    let func: NonNull<FN> = func_env.cast();
+
+                    &*func.as_ptr()
+                },
+
+                // This branch is supposed to be unreachable.
+                None => unreachable!()
+            };
+
+            let values = func(vmctx, &vec![Value::I32(7)]);
+            println!("Values returned {:?}", values);
+            (2, 0, 0)
             // let value = *values.iter().map(|value| match value {
             //     Value::I32(v) => v,
             //     _ => unimplemented!(),
@@ -333,8 +353,9 @@ where
             // value
         }
         // let func_env = NonNull::new(&variadic_func as *const _ as *mut vm::FuncEnv);
-        let func_env = None; // We don't have a closure environment
-        let func = NonNull::new(variadic_func as *mut vm::Func).unwrap();
+        // let func_env = None; // We don't have a closure environment
+        let func_env: Option<NonNull<vm::FuncEnv>> = NonNull::new(&variadic_func::<F> as *const _ as *mut vm::FuncEnv);
+        let func = NonNull::new(variadic_func::<F> as *mut vm::Func).unwrap();
 
         Func {
             inner: Host(()),

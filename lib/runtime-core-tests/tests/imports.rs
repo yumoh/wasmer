@@ -147,9 +147,11 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     use wasmer_runtime_core::types::{FuncSig, Type};
     
     let sig = Arc::new(FuncSig::new(vec![Type::I32], vec![Type::I32]));
-    let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, |_ctx, _params| {
+    let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, |_ctx, params| {
         println!("Polymorphic closure");
-        vec![Value::I32(2)]
+        println!("Params: {:?}", params);
+        // vec![Value::I32(params[0])]
+        params.to_vec()
     });
     // fn poly_inner(_vmctx: &mut vm::Ctx, _args: &[Value]) -> Vec<Value> {
     //     println!("Polymorphic closure");
