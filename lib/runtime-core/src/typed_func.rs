@@ -233,6 +233,7 @@ pub struct Func<'a, Args = (), Rets = (), Inner: Kind = Wasm> {
     func: NonNull<vm::Func>,
     func_env: Option<NonNull<vm::FuncEnv>>,
     vmctx: *mut vm::Ctx,
+    signature: Arc<FuncSig>,
     _phantom: PhantomData<(&'a (), Args, Rets)>,
 }
 
@@ -255,6 +256,7 @@ where
             func,
             func_env,
             vmctx,
+            signature: Arc::new(FuncSig::new(Args::types(), Rets::types())),
             _phantom: PhantomData,
         }
     }
@@ -278,86 +280,108 @@ where
             func,
             func_env,
             vmctx: ptr::null_mut(),
+            signature: Arc::new(FuncSig::new(Args::types(), Rets::types())),
             _phantom: PhantomData,
         }
     }
 
     /// Creates a polymorphic function
-    pub fn new_polymorphic<F>(signature: Arc<FuncSig>, func: F) -> Func<'a, Args, Rets, Host>
+    pub fn new_polymorphic<F>(signature: Arc<FuncSig>, _func: F) -> Func<'a, Args, Rets, Host>
     where
         F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
     {
-        
-        unsafe extern "C" fn wrap_inner<
-            F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
-        >(
-            _cif: &libffi::low::ffi_cif,
-            _result: &mut u64,
-            args: *const *const c_void,
-            _userdata: &F,
-        ) {
-            let args: *const &u64 = mem::transmute(args);
-            let arg1 = **args.offset(0);
-            let arg2 = **args.offset(1);
-            // let args: *const Value = mem::transmute(args);
-            // let args = std::slice::from_raw_parts(args, *args);
-
-            println!("{:?} {:?}", arg1, arg2);
-            unimplemented!("UNIMPLEMENTED");
-            // let args: *const Value = mem::transmute(args);
-            // let args = std::slice::from_raw_parts(args, *args);
-            // println!("{:?}", args);
-            // unimplemented!("UNIMPLEMENTED");
-            // TODO: results and errors.
-            // func(vmctx, args);
+        extern "C" fn variadic_func(_ctx: &mut vm::Ctx, mut _args: va_list::VaList) {
+            println!("asdfasfasfd");
         }
-
-        fn wasm_ty_to_libffi_ty(ty: &Type) -> libffi::middle::Type {
-            match ty {
-                Type::I32 => libffi::middle::Type::u32(),
-                Type::I64 => libffi::middle::Type::u64(),
-                Type::F32 => libffi::middle::Type::f32(),
-                Type::F64 => libffi::middle::Type::f64(),
-                Type::V128 => libffi::middle::Type::structure(vec![
-                    libffi::middle::Type::u64(),
-                    libffi::middle::Type::u64(),
-                ]),
-            }
-        }
-
-        let mut builder = libffi::middle::Builder::new();
-        for param in signature.params() {
-            builder = builder.arg(wasm_ty_to_libffi_ty(param));
-        }
-        match signature.returns().len() {
-            0 => {}
-            1 => {
-                builder = builder.res(wasm_ty_to_libffi_ty(&signature.returns()[0]));
-            }
-            _ => {
-                let returns: Vec<libffi::middle::Type> = signature
-                        .returns()
-                        .iter()
-                        .map(wasm_ty_to_libffi_ty)
-                        .collect();
-                builder = builder.res(libffi::middle::Type::structure(
-                    returns
-                ));
-            }
-        };
-        let closure = builder.into_closure(wrap_inner, &func);
-
-        let func_ptr: *const vm::Func = unsafe { mem::transmute(closure.code_ptr()) } ; 
-        let func = NonNull::new(func_ptr as _).unwrap();
-        let func_env = None;
+        // let func_env = NonNull::new(&variadic_func as *const _ as *mut vm::FuncEnv);
+        let func_env = None; // We don't have a closure environment
+        let func = NonNull::new(&variadic_func as *const _ as _).unwrap();
 
         Func {
             inner: Host(()),
             func,
             func_env,
             vmctx: ptr::null_mut(),
+            signature,
             _phantom: PhantomData,
         }
+
+        // Here's the other strategy (libffi)
+
+        // unsafe extern "C" fn wrap_inner<
+        //     F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
+        // >(
+        //     _cif: &libffi::low::ffi_cif,
+        //     _result: &mut u64,
+        //     args: *const *const c_void,
+        //     _userdata: &F,
+        // ) {
+        //     println!("POLYMORPHIC");
+        //     let args: *const &u64 = mem::transmute(args);
+        //     let arg1 = **args.offset(0);
+        //     let arg2 = **args.offset(1);
+        //     // let args: *const Value = mem::transmute(args);
+        //     // let args = std::slice::from_raw_parts(args, *args);
+
+        //     println!("{:?} {:?}", arg1, arg2);
+        //     unimplemented!("UNIMPLEMENTED");
+        //     // let args: *const Value = mem::transmute(args);
+        //     // let args = std::slice::from_raw_parts(args, *args);
+        //     // println!("{:?}", args);
+        //     // unimplemented!("UNIMPLEMENTED");
+        //     // TODO: results and errors.
+        //     // func(vmctx, args);
+        // }
+
+        // fn wasm_ty_to_libffi_ty(ty: &Type) -> libffi::middle::Type {
+        //     match ty {
+        //         Type::I32 => libffi::middle::Type::u32(),
+        //         Type::I64 => libffi::middle::Type::u64(),
+        //         Type::F32 => libffi::middle::Type::f32(),
+        //         Type::F64 => libffi::middle::Type::f64(),
+        //         Type::V128 => libffi::middle::Type::structure(vec![
+        //             libffi::middle::Type::u64(),
+        //             libffi::middle::Type::u64(),
+        //         ]),
+        //     }
+        // }
+
+        // let mut builder = libffi::middle::Builder::new();
+        // // Let's add the context first
+        // builder = builder.arg(libffi::middle::Type::pointer());
+        // for param in signature.params() {
+        //     builder = builder.arg(wasm_ty_to_libffi_ty(param));
+        // }
+        // match signature.returns().len() {
+        //     0 => {}
+        //     1 => {
+        //         builder = builder.res(wasm_ty_to_libffi_ty(&signature.returns()[0]));
+        //     }
+        //     _ => {
+        //         let returns: Vec<libffi::middle::Type> = signature
+        //                 .returns()
+        //                 .iter()
+        //                 .map(wasm_ty_to_libffi_ty)
+        //                 .collect();
+        //         builder = builder.res(libffi::middle::Type::structure(
+        //             returns
+        //         ));
+        //     }
+        // };
+        // let closure = builder.into_closure(wrap_inner, &func);
+
+        // let func_ptr: *const vm::Func = unsafe { mem::transmute(closure.code_ptr()) } ; 
+        // let func = NonNull::new(func_ptr as _).unwrap();
+        // let func_env = None;
+
+        // Func {
+        //     inner: Host(()),
+        //     func,
+        //     func_env,
+        //     vmctx: ptr::null_mut(),
+        //     signature,
+        //     _phantom: PhantomData,
+        // }
     }
 
 
@@ -803,12 +827,11 @@ where
             func_env @ Some(_) => Context::ExternalWithEnv(self.vmctx, func_env),
             None => Context::Internal,
         };
-        let signature = Arc::new(FuncSig::new(Args::types(), Rets::types()));
 
         Export::Function {
             func,
             ctx,
-            signature,
+            signature: self.signature.clone(),
         }
     }
 }
@@ -931,17 +954,17 @@ mod tests {
     }
 
     // Here's the test for the polymorphic call
-    // #[test]
-    // fn test_func_polymorphic_call() {
-    //     let signature = Arc::new(FuncSig::new(vec![Type::I32, Type::I32], vec![Type::I32]));
-    //     let f: Func<(), (), Host> = Func::new_polymorphic(signature, |_ctx, _values| {
-    //         println!("POLIMORPHIC CALL");
-    //         return vec![];
-    //     });
-    //     let function = unsafe {
-    //         std::mem::transmute::<*mut c_void, fn(i32, i32) -> i32>(f.func.as_ref().0)
-    //     };
-    //     function(1, 2);
-    // }
+    #[test]
+    fn test_func_polymorphic_call() {
+        let signature = Arc::new(FuncSig::new(vec![Type::I32, Type::I32], vec![Type::I32]));
+        let f: Func<(), (), Host> = Func::new_polymorphic(signature, |_ctx, _values| {
+            println!("POLIMORPHIC CALL");
+            return vec![];
+        });
+        let function = unsafe {
+            std::mem::transmute::<*mut c_void, fn(i32, i32) -> i32>(f.func.as_ref().0)
+        };
+        function(1, 2);
+    }
 
 }

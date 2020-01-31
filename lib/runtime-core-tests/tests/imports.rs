@@ -1,7 +1,8 @@
 use wasmer_runtime_core::{
-    compile_with, error::RuntimeError, imports, memory::Memory, typed_func::Func,
+    compile_with, error::RuntimeError, imports, memory::Memory, typed_func::Func, typed_func::Host,
     types::MemoryDescriptor, units::Pages, vm, Instance,
 };
+use std::sync::Arc;
 use wasmer_runtime_core_tests::{get_compiler, wat2wasm};
 
 macro_rules! call_and_assert {
@@ -83,6 +84,9 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
   (import "env" "callback_closure_trap_with_vmctx" (func $callback_closure_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx_and_env" (func $callback_closure_trap_with_vmctx_and_env (type $type)))
 
+  (import "env" "callback_polymorphic_closure" (func $callback_polymorphic_closure (type $type)))
+
+  
   (func (export "function_fn") (type $type)
     get_local 0
     call $callback_fn)
@@ -125,7 +129,12 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
   (func (export "function_closure_trap_with_vmctx_and_env") (type $type)
     get_local 0
-    call $callback_closure_trap_with_vmctx_and_env))
+    call $callback_closure_trap_with_vmctx_and_env)
+
+  (func (export "function_polymorphic_closure") (type $type)
+    get_local 0
+    call $callback_polymorphic_closure)
+)
 "#;
 
     let wasm_binary = wat2wasm(MODULE.as_bytes()).expect("WAST not valid or malformed");
@@ -134,6 +143,14 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     let memory = Memory::new(memory_descriptor).unwrap();
 
     memory.view()[0].set(SHIFT);
+
+    use wasmer_runtime_core::types::{FuncSig, Type};
+    
+    let sig = Arc::new(FuncSig::new(vec![Type::I32], vec![Type::I32]));
+    let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, |_ctx, _params| {
+        println!("Polymorphic closure");
+        vec![]
+    });
 
     let import_object = imports! {
         "env" => {
@@ -146,6 +163,9 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
             "callback_closure" => Func::new(|n: i32| -> Result<i32, ()> {
                 Ok(n + 1)
             }),
+
+            // Closure without a captured environment.
+            "callback_polymorphic_closure" => polymorphic,
 
             // Closure with a captured environment (a single variable + an instance of `Memory`).
             "callback_closure_with_env" => Func::new(move |n: i32| -> Result<i32, ()> {
@@ -291,4 +311,9 @@ test!(
     Err(RuntimeError::Error {
         data: Box::new(format!("! {}", 2 + shift + SHIFT))
     })
+);
+test!(
+    test_polymorphic_closure,
+    function_polymorphic_closure,
+    Ok(2)
 );
