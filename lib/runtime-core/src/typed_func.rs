@@ -372,9 +372,9 @@ where
             F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
         >(
             _cif: &libffi::low::ffi_cif,
-            result: &mut usize,
+            result: &mut u64,
             args: *const *const c_void,
-            userdata: &F,
+            userdata: &(&F, Arc<FuncSig>),
         ) {
             println!("Calling POLYMORPHIC function");
             let args: *const &u64 = mem::transmute(args);
@@ -394,18 +394,33 @@ where
             // let arg2 = **args.offset(1);
             // let args: *const Value = mem::transmute(args);
             // let args = std::slice::from_raw_parts(args, *args);
-            let values = userdata(&mut *ctx as _, &vec![]);
+            let (func, signature) = userdata;
+            println!("Received signature: {:?}", signature);
+            let values = func(&mut *ctx as _, &vec![Value::I32(7)]);
             println!("VALUES received by the closure: {:?}", values);
-            let single_result: i32 = *values.iter().map(|value| match value {
-                Value::I32(v) => v,
+            let single_result: Vec<u64> = values.iter().map(|value| match value {
+                Value::I32(v) => *v as _,
                 _ => unimplemented!(),
                 // Value::I64(v) => v,
                 // Value::F32(v) => v,
                 // Value::F64(v) => v,
                 // Value::V128(_) => unimplemented!("V128 is not implemented"),
-            }).next().unwrap();
+            }).collect::<Vec<u64>>();
             println!("Returned result from the POLYMORPHIC function: {:?}", single_result);
-            *result = single_result as _;
+            let returns = signature.returns();
+            match returns.len() {
+                0 => {},
+                1 =>  {
+                    *result = single_result[0] as _;
+                    // *result: Vec<u64> = vec![single_result[0] as *const _ as _];
+                },
+                2 =>  {
+                    // *result = single_result;
+
+                    // result = (single_result[0] as _, single_result[1]);
+                },
+                _ => unreachable!("Not implemented"),
+            }
             // println!("{:?} {:?}", arg1, arg2);
             // unimplemented!("UNIMPLEMENTED");
             // let args: *const Value = mem::transmute(args);
@@ -451,10 +466,17 @@ where
                 ));
             }
         };
-        let closure = builder.into_closure(wrap_inner, &func);
+        let cloned_signature = signature.clone();
+        let userdata = Box::new((&func, cloned_signature));
+        let closure = builder.into_closure(wrap_inner, &*userdata);
 
-        let func_ptr: *mut vm::Func = *closure.code_ptr() as *mut vm::Func; 
-        let func = NonNull::new(func_ptr as *mut vm::Func).unwrap();
+        let func_ptr = closure.code_ptr(); 
+        let func = NonNull::new(*func_ptr as *mut vm::Func).unwrap();
+        // Assure the closure will not be freed (is leaking)
+        std::mem::forget(closure);
+        Box::leak(userdata);
+
+        // std::mem::forget(cloned_signature.as_ref());
         // let func_env: Option<NonNull<vm::FuncEnv>> = NonNull::new(&variadic_func::<F> as *const _ as *mut vm::FuncEnv);
         // let func = NonNull::new(variadic_func::<F> as *mut vm::Func).unwrap();
         let func_env = None;
