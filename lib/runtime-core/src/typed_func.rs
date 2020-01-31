@@ -286,16 +286,55 @@ where
     }
 
     /// Creates a polymorphic function
-    pub fn new_polymorphic<F>(signature: Arc<FuncSig>, _func: F) -> Func<'a, Args, Rets, Host>
+    #[allow(unused_variables)]
+    pub fn new_polymorphic<F>(signature: Arc<FuncSig>, func: F) -> Func<'a, Args, Rets, Host>
     where
         F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
     {
-        extern "C" fn variadic_func(_ctx: &mut vm::Ctx, mut _args: va_list::VaList) {
+        extern "C" fn variadic_func(vmctx: &mut vm::Ctx, mut _args: va_list::VaList) -> i32 {
             println!("asdfasfasfd");
+            let self_pointer = variadic_func as *const vm::Func;
+            // Get the collection of imported functions.
+            let vm_imported_functions = unsafe { &(*vmctx.import_backing).vm_functions };
+
+            // Retrieve the `vm::FuncCtx`.
+            let mut func_ctx: NonNull<vm::FuncCtx> = vm_imported_functions
+                .iter()
+                .find_map(|(_, imported_func)| {
+                    if imported_func.func == self_pointer {
+                        Some(imported_func.func_ctx)
+                    } else {
+                        None
+                    }
+                })
+                .expect("Import backing is not well-formed, cannot find `func_ctx`.");
+            let func_ctx = unsafe { func_ctx.as_mut() };
+
+            // for param in signature.params() {
+            //     match param {
+            //         Type::I32 => libffi::middle::Type::u32(),
+            //         Type::I64 => libffi::middle::Type::u64(),
+            //         Type::F32 => libffi::middle::Type::f32(),
+            //         Type::F64 => libffi::middle::Type::f64(),
+            //         _ => 
+            //     }
+            //     param = builder.arg(wasm_ty_to_libffi_ty(param));
+            // }
+            2
+            // let values = func(ctx, vec![]);
+            // let value = *values.iter().map(|value| match value {
+            //     Value::I32(v) => v,
+            //     _ => unimplemented!(),
+            //     // Value::I64(v) => v,
+            //     // Value::F32(v) => v,
+            //     // Value::F64(v) => v,
+            //     // Value::V128(_) => unimplemented!("V128 is not implemented"),
+            // }).next().unwrap();
+            // value
         }
         // let func_env = NonNull::new(&variadic_func as *const _ as *mut vm::FuncEnv);
         let func_env = None; // We don't have a closure environment
-        let func = NonNull::new(&variadic_func as *const _ as _).unwrap();
+        let func = NonNull::new(variadic_func as *mut vm::Func).unwrap();
 
         Func {
             inner: Host(()),
@@ -312,19 +351,42 @@ where
         //     F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
         // >(
         //     _cif: &libffi::low::ffi_cif,
-        //     _result: &mut u64,
+        //     result: &mut usize,
         //     args: *const *const c_void,
-        //     _userdata: &F,
+        //     userdata: &F,
         // ) {
-        //     println!("POLYMORPHIC");
+        //     println!("Calling POLYMORPHIC function");
         //     let args: *const &u64 = mem::transmute(args);
-        //     let arg1 = **args.offset(0);
-        //     let arg2 = **args.offset(1);
+        //     let ctx: *mut vm::Ctx = **args.offset(0) as _;
+        //     // let passed_params: Vec<Value> = vec![];
+        //     // for param in signature.params() {
+        //     //     match param {
+        //     //         Type::I32 => libffi::middle::Type::u32(),
+        //     //         Type::I64 => libffi::middle::Type::u64(),
+        //     //         Type::F32 => libffi::middle::Type::f32(),
+        //     //         Type::F64 => libffi::middle::Type::f64(),
+        //     //         _ => 
+        //     //     }
+        //     //     param = builder.arg(wasm_ty_to_libffi_ty(param));
+        //     // }
+    
+        //     // let arg2 = **args.offset(1);
         //     // let args: *const Value = mem::transmute(args);
         //     // let args = std::slice::from_raw_parts(args, *args);
-
-        //     println!("{:?} {:?}", arg1, arg2);
-        //     unimplemented!("UNIMPLEMENTED");
+        //     let values = userdata(&mut *ctx as _, &vec![]);
+        //     println!("VALUES received by the closure: {:?}", values);
+        //     let single_result: i32 = *values.iter().map(|value| match value {
+        //         Value::I32(v) => v,
+        //         _ => unimplemented!(),
+        //         // Value::I64(v) => v,
+        //         // Value::F32(v) => v,
+        //         // Value::F64(v) => v,
+        //         // Value::V128(_) => unimplemented!("V128 is not implemented"),
+        //     }).next().unwrap();
+        //     println!("Returned result from the POLYMORPHIC function: {:?}", single_result);
+        //     *result = single_result as _;
+        //     // println!("{:?} {:?}", arg1, arg2);
+        //     // unimplemented!("UNIMPLEMENTED");
         //     // let args: *const Value = mem::transmute(args);
         //     // let args = std::slice::from_raw_parts(args, *args);
         //     // println!("{:?}", args);
@@ -370,8 +432,8 @@ where
         // };
         // let closure = builder.into_closure(wrap_inner, &func);
 
-        // let func_ptr: *const vm::Func = unsafe { mem::transmute(closure.code_ptr()) } ; 
-        // let func = NonNull::new(func_ptr as _).unwrap();
+        // let func_ptr: *mut vm::Func = *closure.code_ptr() as *mut vm::Func; 
+        // let func = NonNull::new(func_ptr).unwrap();
         // let func_env = None;
 
         // Func {

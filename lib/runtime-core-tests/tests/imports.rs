@@ -1,6 +1,6 @@
 use wasmer_runtime_core::{
     compile_with, error::RuntimeError, imports, memory::Memory, typed_func::Func, typed_func::Host,
-    types::MemoryDescriptor, units::Pages, vm, Instance,
+    types::{MemoryDescriptor, Value}, units::Pages, vm, Instance,
 };
 use std::sync::Arc;
 use wasmer_runtime_core_tests::{get_compiler, wat2wasm};
@@ -149,8 +149,13 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     let sig = Arc::new(FuncSig::new(vec![Type::I32], vec![Type::I32]));
     let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, |_ctx, _params| {
         println!("Polymorphic closure");
-        vec![]
+        vec![Value::I32(2)]
     });
+    // fn poly_inner(_vmctx: &mut vm::Ctx, _args: &[Value]) -> Vec<Value> {
+    //     println!("Polymorphic closure");
+    //     vec![Value::I32(2)]
+    // }
+    // let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, poly_inner);
 
     let import_object = imports! {
         "env" => {
