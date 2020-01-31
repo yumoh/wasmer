@@ -1,6 +1,7 @@
 use wasmer_runtime_core::{
-    compile_with, error::RuntimeError, imports, memory::Memory, typed_func::Func, typed_func::Host,
+    compile_with_config, error::RuntimeError, imports, memory::Memory, typed_func::Func, typed_func::{Host, S3},
     types::{MemoryDescriptor, Value}, units::Pages, vm, Instance,
+    backend::{CompilerConfig, Features}
 };
 use std::sync::Arc;
 use wasmer_runtime_core_tests::{get_compiler, wat2wasm};
@@ -71,6 +72,7 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     const MODULE: &str = r#"
 (module
   (type $type (func (param i32) (result i32)))
+  (type $type2 (func (param i32) (result i64 i64 i64)))
   (import "env" "memory" (memory 1 1))
   (import "env" "callback_fn" (func $callback_fn (type $type)))
   (import "env" "callback_closure" (func $callback_closure (type $type)))
@@ -84,7 +86,7 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
   (import "env" "callback_closure_trap_with_vmctx" (func $callback_closure_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx_and_env" (func $callback_closure_trap_with_vmctx_and_env (type $type)))
 
-  (import "env" "callback_polymorphic_closure" (func $callback_polymorphic_closure (type $type)))
+  (import "env" "callback_polymorphic_closure" (func $callback_polymorphic_closure (type $type2)))
 
   
   (func (export "function_fn") (type $type)
@@ -131,14 +133,16 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     get_local 0
     call $callback_closure_trap_with_vmctx_and_env)
 
-  (func (export "function_polymorphic_closure") (type $type)
+  (func (export "function_polymorphic_closure") (type $type2)
     get_local 0
     call $callback_polymorphic_closure)
 )
 "#;
 
-    let wasm_binary = wat2wasm(MODULE.as_bytes()).expect("WAST not valid or malformed");
-    let module = compile_with(&wasm_binary, &get_compiler()).unwrap();
+    let mut features = wabt::Features::new();
+    features.enable_all();
+    let wasm_binary = wabt::wat2wasm_with_features(MODULE.as_bytes(), features).expect("WAST not valid or malformed");
+    let module = compile_with_config(&wasm_binary, &get_compiler(), CompilerConfig { features: Features { simd: true, threads: true, multi_value: true }, ..Default::default() }).unwrap();
     let memory_descriptor = MemoryDescriptor::new(Pages(1), Some(Pages(1)), false).unwrap();
     let memory = Memory::new(memory_descriptor).unwrap();
 
@@ -146,12 +150,11 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
     use wasmer_runtime_core::types::{FuncSig, Type};
     
-    let sig = Arc::new(FuncSig::new(vec![Type::I32], vec![Type::I32]));
+    let sig = Arc::new(FuncSig::new(vec![Type::I32], vec![Type::I64, Type::I64, Type::I64]));
     let polymorphic: Func<(), (), Host> = Func::new_polymorphic(sig, |_ctx, params| {
         println!("Polymorphic closure");
         println!("Params: {:?}", params);
-        // vec![Value::I32(params[0])]
-        params.to_vec()
+        vec![Value::I64(7), Value::I64(8), Value::I64(9)]
     });
     // fn poly_inner(_vmctx: &mut vm::Ctx, _args: &[Value]) -> Vec<Value> {
     //     println!("Polymorphic closure");
@@ -319,8 +322,17 @@ test!(
         data: Box::new(format!("! {}", 2 + shift + SHIFT))
     })
 );
-test!(
-    test_polymorphic_closure,
-    function_polymorphic_closure,
-    Ok(2)
-);
+
+#[test]
+fn test_polymorphic_closure() {
+    imported_functions_forms(&|instance| {
+        //let function = function_polymorphic_closure;
+        //let expected_value = Ok((7u64, 8u64, 9u64));
+//        call_and_assert!(instance, function, expected_value);
+        let fnz: Func<i32, (i64, i64, i64)> = instance.func("function_polymorphic_closure").unwrap();
+
+        let result = fnz.call(1);
+
+        dbg!(result);
+    });
+}

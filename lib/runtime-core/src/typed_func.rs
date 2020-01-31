@@ -140,7 +140,7 @@ pub trait WasmTypeList {
 
     /// This method is used to distribute the values onto a function,
     /// e.g. `(1, 2).call(func, …)`. This form is unlikely to be used
-    /// directly in the code, see the `Func:call` implementation.
+    /// directly in the code, see the `Func::call` implementation.
     unsafe fn call<Rets>(
         self,
         f: NonNull<vm::Func>,
@@ -372,12 +372,13 @@ where
             F: Fn(&mut vm::Ctx, &[Value]) -> Vec<Value>,
         >(
             _cif: &libffi::low::ffi_cif,
-            result: &mut u64,
+            result: &mut (i64, i64, i64),
             args: *const *const c_void,
             userdata: &(&F, Arc<FuncSig>),
         ) {
             println!("Calling POLYMORPHIC function");
             let args: *const &u64 = mem::transmute(args);
+            //let result: *mut u64 = mem::transmute(result);
             let ctx: *mut vm::Ctx = **args.offset(0) as _;
             // let passed_params: Vec<Value> = vec![];
             // for param in signature.params() {
@@ -400,6 +401,7 @@ where
             println!("VALUES received by the closure: {:?}", values);
             let single_result: Vec<u64> = values.iter().map(|value| match value {
                 Value::I32(v) => *v as _,
+                Value::I64(v) => *v as _,
                 _ => unimplemented!(),
                 // Value::I64(v) => v,
                 // Value::F32(v) => v,
@@ -410,14 +412,18 @@ where
             let returns = signature.returns();
             match returns.len() {
                 0 => {},
-                1 =>  {
-                    *result = single_result[0] as _;
-                    // *result: Vec<u64> = vec![single_result[0] as *const _ as _];
+                1 => {
+                    //*result = single_result[0];
                 },
-                2 =>  {
-                    // *result = single_result;
-
-                    // result = (single_result[0] as _, single_result[1]);
+                2 => {
+                    //*result = single_result[0];
+                    //*(result.offset(1)) = single_result[1];
+                },
+                3 => {
+                    *result = *Box::leak(Box::new((single_result[0] as _, single_result[1] as _, single_result[2] as _)));
+                    //*result = single_result[0];
+                    //*(result.offset(1)) = single_result[1];
+                    //*(result.offset(2)) = single_result[2];
                 },
                 _ => unreachable!("Not implemented"),
             }
