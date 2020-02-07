@@ -41,7 +41,7 @@ pub struct Ctx {
     /// InternalCtx data field
     pub internal: InternalCtx,
 
-    pub(crate) local_functions: *const *const Func,
+    pub(crate) local_functions: *const FuncCtx,
 
     /// These are pointers to things that are known to be owned
     /// by the owning `Instance`.

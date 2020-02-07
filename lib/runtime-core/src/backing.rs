@@ -40,7 +40,7 @@ pub struct LocalBacking {
     pub(crate) tables: BoxedMap<LocalTableIndex, Table>,
     pub(crate) globals: BoxedMap<LocalGlobalIndex, Global>,
 
-    /// This own the memory containing the pointers to the local memories.
+    /// This owns the memory containing the pointers to the local memories.
     /// While simplifying implementation, this adds indirection and may hurt
     /// performance, especially on cache-starved systems.
     pub(crate) vm_memories: BoxedMap<LocalMemoryIndex, *mut vm::LocalMemory>,
@@ -51,7 +51,7 @@ pub struct LocalBacking {
     /// the `call_indirect` wasm instruction. This field (and local_functions
     /// as well) are subject to change.
     pub(crate) dynamic_sigindices: BoxedMap<SigIndex, vm::SigId>,
-    pub(crate) local_functions: BoxedMap<LocalFuncIndex, *const vm::Func>,
+    pub(crate) local_functions: BoxedMap<LocalFuncIndex, vm::FuncCtx>,
 
     pub(crate) internals: Internals,
 }
@@ -85,7 +85,7 @@ impl LocalBacking {
         let vm_globals = Self::finalize_globals(&mut globals);
 
         let dynamic_sigindices = Self::generate_sigindices(&module.info);
-        let local_functions = Self::generate_local_functions(module);
+        let local_functions = Self::generate_local_functions(module, vmctx);
 
         Ok(Self {
             memories,
@@ -103,14 +103,20 @@ impl LocalBacking {
         })
     }
 
-    fn generate_local_functions(module: &ModuleInner) -> BoxedMap<LocalFuncIndex, *const vm::Func> {
+    fn generate_local_functions(
+        module: &ModuleInner,
+        vmctx: *mut vm::Ctx,
+    ) -> BoxedMap<LocalFuncIndex, vm::FuncCtx> {
         (0..module.info.func_assoc.len() - module.info.imported_functions.len())
-            .map(|index| {
-                module
-                    .runnable_module
-                    .get_func(&module.info, LocalFuncIndex::new(index))
-                    .unwrap()
-                    .as_ptr() as *const _
+            .map(|index| vm::FuncCtx {
+                vmctx: NonNull::new(vmctx).unwrap(),
+                func_env: NonNull::new(
+                    module
+                        .runnable_module
+                        .get_func(&module.info, LocalFuncIndex::new(index))
+                        .unwrap()
+                        .as_ptr() as *mut _,
+                ),
             })
             .collect::<Map<_, _>>()
             .into_boxed_map()
