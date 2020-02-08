@@ -303,6 +303,11 @@ where
     pub fn get_vm_func(&self) -> NonNull<vm::Func> {
         self.func
     }
+
+    /// Get the underlying func pointer.
+    pub fn get_vm_funcenv(&self) -> NonNull<vm::FuncEnv> {
+        self.func
+    }
 }
 
 impl WasmTypeList for Infallible {
@@ -444,7 +449,7 @@ macro_rules! impl_traits {
                 // able to unwind through this function.
                 #[cfg_attr(nightly, unwind(allowed))]
                 extern fn wrap<$( $x, )* Rets, Trap, FN>(
-                    vmctx: &vm::Ctx $( , $x: <$x as WasmExternType>::Native )*
+                    func_ctx: &mut vm::FuncCtx $( , $x: <$x as WasmExternType>::Native )*
                 ) -> Rets::CStruct
                 where
                     $( $x: WasmExternType, )*
@@ -452,25 +457,6 @@ macro_rules! impl_traits {
                     Trap: TrapEarly<Rets>,
                     FN: Fn(&mut vm::Ctx, $( $x, )*) -> Trap,
                 {
-                    // Get the pointer to this `wrap` function.
-                    let self_pointer = wrap::<$( $x, )* Rets, Trap, FN> as *const vm::Func;
-
-                    // Get the collection of imported functions.
-                    let vm_imported_functions = unsafe { &(*vmctx.import_backing).vm_functions };
-
-                    // Retrieve the `vm::FuncCtx`.
-                    let mut func_ctx: NonNull<vm::FuncCtx> = vm_imported_functions
-                        .iter()
-                        .find_map(|(_, imported_func)| {
-                            if imported_func.func == self_pointer {
-                                Some(imported_func.func_ctx)
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("Import backing is not well-formed, cannot find `func_ctx`.");
-                    let func_ctx = unsafe { func_ctx.as_mut() };
-
                     // Extract `vm::Ctx` from `vm::FuncCtx`. The
                     // pointer is always non-null.
                     let vmctx = unsafe { func_ctx.vmctx.as_mut() };
@@ -559,7 +545,7 @@ macro_rules! impl_traits {
                 // able to unwind through this function.
                 #[cfg_attr(nightly, unwind(allowed))]
                 extern fn wrap<$( $x, )* Rets, Trap, FN>(
-                    vmctx: &vm::Ctx $( , $x: <$x as WasmExternType>::Native )*
+                    func_ctx: &mut vm::FuncCtx $( , $x: <$x as WasmExternType>::Native )*
                 ) -> Rets::CStruct
                 where
                     $( $x: WasmExternType, )*
@@ -567,25 +553,6 @@ macro_rules! impl_traits {
                     Trap: TrapEarly<Rets>,
                     FN: Fn($( $x, )*) -> Trap,
                 {
-                    // Get the pointer to this `wrap` function.
-                    let self_pointer = wrap::<$( $x, )* Rets, Trap, FN> as *const vm::Func;
-
-                    // Get the collection of imported functions.
-                    let vm_imported_functions = unsafe { &(*vmctx.import_backing).vm_functions };
-
-                    // Retrieve the `vm::FuncCtx`.
-                    let mut func_ctx: NonNull<vm::FuncCtx> = vm_imported_functions
-                        .iter()
-                        .find_map(|(_, imported_func)| {
-                            if imported_func.func == self_pointer {
-                                Some(imported_func.func_ctx)
-                            } else {
-                                None
-                            }
-                        })
-                        .expect("Import backing is not well-formed, cannot find `func_ctx`.");
-                    let func_ctx = unsafe { func_ctx.as_mut() };
-
                     // Extract `vm::Ctx` from `vm::FuncCtx`. The
                     // pointer is always non-null.
                     let vmctx = unsafe { func_ctx.vmctx.as_mut() };

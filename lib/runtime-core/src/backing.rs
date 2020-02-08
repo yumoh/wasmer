@@ -379,24 +379,16 @@ impl LocalBacking {
                             let sig_id =
                                 vm::SigId(SigRegistry.lookup_sig_index(signature).index() as u32);
 
-                            let (func, ctx) = match func_index.local_or_import(&module.info) {
+                            let func_ctx = match func_index.local_or_import(&module.info) {
                                 LocalOrImport::Local(local_func_index) => (
-                                    module
-                                        .runnable_module
-                                        .get_func(&module.info, local_func_index)
-                                        .unwrap()
-                                        .as_ptr()
-                                        as *const vm::Func,
-                                    vmctx,
+                                    (*vmctx).local_functions.offset(local_func_index.index() as isize)
                                 ),
                                 LocalOrImport::Import(imported_func_index) => {
-                                    let vm::ImportedFunc { func, func_ctx } =
-                                        imports.vm_functions[imported_func_index];
-                                    (func, unsafe { func_ctx.as_ref() }.vmctx.as_ptr())
+                                    &imports.vm_functions[imported_func_index] as *const _
                                 }
                             };
 
-                            elements[init_base + i] = vm::Anyfunc { func, ctx, sig_id };
+                            elements[init_base + i] = vm::Anyfunc { func_ctx, sig_id };
                         }
                     });
                 }
@@ -412,24 +404,16 @@ impl LocalBacking {
                             let sig_id =
                                 vm::SigId(SigRegistry.lookup_sig_index(signature).index() as u32);
 
-                            let (func, ctx) = match func_index.local_or_import(&module.info) {
+                            let func_ctx = match func_index.local_or_import(&module.info) {
                                 LocalOrImport::Local(local_func_index) => (
-                                    module
-                                        .runnable_module
-                                        .get_func(&module.info, local_func_index)
-                                        .unwrap()
-                                        .as_ptr()
-                                        as *const vm::Func,
-                                    vmctx,
+                                    (*vmctx).local_functions.offset(local_func_index.index() as isize)
                                 ),
                                 LocalOrImport::Import(imported_func_index) => {
-                                    let vm::ImportedFunc { func, func_ctx } =
-                                        imports.vm_functions[imported_func_index];
-                                    (func, unsafe { func_ctx.as_ref() }.vmctx.as_ptr())
+                                    &imports.vm_functions[imported_func_index] as *const _
                                 }
                             };
 
-                            elements[init_base + i] = vm::Anyfunc { func, ctx, sig_id };
+                            elements[init_base + i] = vm::Anyfunc { func_ctx, sig_id };
                         }
                     });
                 }
@@ -497,7 +481,7 @@ pub struct ImportBacking {
     pub(crate) tables: BoxedMap<ImportedTableIndex, Table>,
     pub(crate) globals: BoxedMap<ImportedGlobalIndex, Global>,
 
-    pub(crate) vm_functions: BoxedMap<ImportedFuncIndex, vm::ImportedFunc>,
+    pub(crate) vm_functions: BoxedMap<ImportedFuncIndex, vm::FuncCtx>,
     pub(crate) vm_memories: BoxedMap<ImportedMemoryIndex, *mut vm::LocalMemory>,
     pub(crate) vm_tables: BoxedMap<ImportedTableIndex, *mut vm::LocalTable>,
     pub(crate) vm_globals: BoxedMap<ImportedGlobalIndex, *mut vm::LocalGlobal>,
@@ -556,22 +540,9 @@ impl ImportBacking {
         }
     }
 
-    /// Gets a `ImportedFunc` from the given `ImportedFuncIndex`.
-    pub fn imported_func(&self, index: ImportedFuncIndex) -> vm::ImportedFunc {
-        self.vm_functions[index].clone()
-    }
-}
-
-impl Drop for ImportBacking {
-    fn drop(&mut self) {
-        // Properly drop the `vm::FuncCtx` in `vm::ImportedFunc`.
-        for (_imported_func_index, imported_func) in (*self.vm_functions).iter_mut() {
-            let func_ctx_ptr = imported_func.func_ctx.as_ptr();
-
-            if !func_ctx_ptr.is_null() {
-                let _: Box<vm::FuncCtx> = unsafe { Box::from_raw(func_ctx_ptr) };
-            }
-        }
+    /// Gets a `FuncCtx` from the given `ImportedFuncIndex`.
+    pub fn imported_func(&self, index: ImportedFuncIndex) -> vm::FuncCtx {
+        self.vm_functions[index]
     }
 }
 
@@ -579,7 +550,7 @@ fn import_functions(
     module: &ModuleInner,
     imports: &ImportObject,
     vmctx: *mut vm::Ctx,
-) -> LinkResult<BoxedMap<ImportedFuncIndex, vm::ImportedFunc>> {
+) -> LinkResult<BoxedMap<ImportedFuncIndex, vm::FuncCtx>> {
     let mut link_errors = vec![];
     let mut functions = Map::with_capacity(module.info.imported_functions.len());
     for (
@@ -606,9 +577,8 @@ fn import_functions(
                 signature,
             }) => {
                 if *expected_sig == *signature {
-                    functions.push(vm::ImportedFunc {
-                        func: func.inner(),
-                        func_ctx: NonNull::new(Box::into_raw(Box::new(vm::FuncCtx {
+                    functions.push(
+                        vm::FuncCtx {
                             //                      ^^^^^^^^ `vm::FuncCtx` is purposely leaked.
                             //                               It is dropped by the specific `Drop`
                             //                               implementation of `ImportBacking`.
@@ -628,9 +598,8 @@ fn import_functions(
                                 Context::ExternalWithEnv(_, func_env) => func_env,
                                 _ => None,
                             },
-                        })))
-                        .unwrap(),
-                    });
+                        }
+                    );
                 } else {
                     link_errors.push(LinkError::IncorrectImportSignature {
                         namespace: namespace.to_string(),
@@ -659,17 +628,15 @@ fn import_functions(
                 if imports.allow_missing_functions {
                     let always_trap = Func::new(always_trap);
 
-                    functions.push(vm::ImportedFunc {
-                        func: always_trap.get_vm_func().as_ptr(),
-                        func_ctx: NonNull::new(Box::into_raw(Box::new(vm::FuncCtx {
+                    functions.push(
+                        vm::FuncCtx {
                             //                      ^^^^^^^^ `vm::FuncCtx` is purposely leaked.
                             //                               It is dropped by the specific `Drop`
                             //                               implementation of `ImportBacking`.
                             vmctx: NonNull::new(vmctx).expect("`vmctx` must not be null."),
-                            func_env: None,
-                        })))
-                        .unwrap(),
-                    });
+                            func_env: NonNull::new(always_trap.get_vm_funcenv().as_ptr()),
+                        }
+                    );
                 } else {
                     link_errors.push(LinkError::ImportNotFound {
                         namespace: namespace.to_string(),
@@ -677,8 +644,8 @@ fn import_functions(
                     });
                 }
             }
-        }
     }
+  }
 
     if !link_errors.is_empty() {
         Err(link_errors)

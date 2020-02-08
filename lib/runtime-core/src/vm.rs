@@ -110,7 +110,7 @@ pub struct InternalCtx {
     pub imported_globals: *mut *mut LocalGlobal,
 
     /// A pointer to an array of imported functions, indexed by `FuncIndex`.
-    pub imported_funcs: *mut ImportedFunc,
+    pub imported_funcs: *mut FuncCtx,
 
     /// A pointer to an array of signature ids. Conceptually, this maps
     /// from a static, module-local signature id to a runtime-global
@@ -586,41 +586,6 @@ impl FuncCtx {
     }
 }
 
-/// An imported function is a function pointer associated to a
-/// function context.
-#[derive(Debug, Clone)]
-#[repr(C)]
-pub struct ImportedFunc {
-    /// Pointer to the function itself.
-    pub(crate) func: *const Func,
-
-    /// Mutable non-null pointer to [`FuncCtx`].
-    pub(crate) func_ctx: NonNull<FuncCtx>,
-}
-
-// Manually implemented because ImportedFunc contains raw pointers
-// directly; `Func` is marked Send (But `Ctx` actually isn't! (TODO:
-// review this, shouldn't `Ctx` be Send?))
-unsafe impl Send for ImportedFunc {}
-
-impl ImportedFunc {
-    /// Offset to the `func` field.
-    #[allow(clippy::erasing_op)] // TODO
-    pub const fn offset_func() -> u8 {
-        0 * (mem::size_of::<usize>() as u8)
-    }
-
-    /// Offset to the `func_ctx` field.
-    pub const fn offset_func_ctx() -> u8 {
-        1 * (mem::size_of::<usize>() as u8)
-    }
-
-    /// Size of an `ImportedFunc`.
-    pub const fn size() -> u8 {
-        mem::size_of::<Self>() as u8
-    }
-}
-
 /// Definition of a table used by the VM. (obviously)
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
@@ -724,11 +689,9 @@ pub struct SigId(pub u32);
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct Anyfunc {
-    /// Const pointer to `Func`.
-    pub func: *const Func,
-    /// Mutable pointer to `Ctx`.
-    pub ctx: *mut Ctx,
-    /// Sig id of this function
+    /// Const pointer to `FuncCtx`.
+    pub func_ctx: *const FuncCtx,
+    /// Signature of this function, using a module-local numbering.
     pub sig_id: SigId,
 }
 
@@ -770,7 +733,7 @@ impl Anyfunc {
 #[cfg(test)]
 mod vm_offset_tests {
     use super::{
-        Anyfunc, Ctx, FuncCtx, ImportedFunc, InternalCtx, LocalGlobal, LocalMemory, LocalTable,
+        Anyfunc, Ctx, FuncCtx, InternalCtx, LocalGlobal, LocalMemory, LocalTable,
     };
 
     // Inspired by https://internals.rust-lang.org/t/discussion-on-offset-of/7440/2.
@@ -911,19 +874,6 @@ mod vm_offset_tests {
         assert_eq!(FuncCtx::offset_vmctx() as usize, 0,);
 
         assert_eq!(FuncCtx::offset_func_env() as usize, 8,);
-    }
-
-    #[test]
-    fn imported_func() {
-        assert_eq!(
-            ImportedFunc::offset_func() as usize,
-            offset_of!(ImportedFunc, func),
-        );
-
-        assert_eq!(
-            ImportedFunc::offset_func_ctx() as usize,
-            offset_of!(ImportedFunc, func_ctx),
-        );
     }
 
     #[test]

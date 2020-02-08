@@ -11,7 +11,7 @@ use std::{ptr, sync::Arc};
 
 enum AnyfuncInner<'a> {
     Host {
-        ptr: *const vm::Func,
+        ptr: *const vm::FuncCtx,
         signature: Arc<FuncSig>,
     },
     Managed(DynFunc<'a>),
@@ -24,7 +24,7 @@ pub struct Anyfunc<'a> {
 
 impl<'a> Anyfunc<'a> {
     /// Create a new `Anyfunc`.
-    pub unsafe fn new<Sig>(func: *const vm::Func, signature: Sig) -> Self
+    pub unsafe fn new<Sig>(func: *const vm::FuncCtx, signature: Sig) -> Self
     where
         Sig: Into<Arc<FuncSig>>,
     {

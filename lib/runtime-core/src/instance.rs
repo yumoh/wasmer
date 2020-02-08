@@ -106,7 +106,7 @@ impl Instance {
                     .get_func(&instance.module.info, local_func_index)
                     .unwrap(),
                 LocalOrImport::Import(import_func_index) => NonNull::new(
-                    instance.inner.import_backing.vm_functions[import_func_index].func as *mut _,
+                    instance.inner.import_backing.vm_functions[import_func_index].func_env.unwrap().as_ptr() as *mut _,
                 )
                 .unwrap(),
             };
@@ -115,8 +115,6 @@ impl Instance {
                 LocalOrImport::Local(_) => instance.inner.vmctx,
                 LocalOrImport::Import(imported_func_index) => unsafe {
                     instance.inner.import_backing.vm_functions[imported_func_index]
-                        .func_ctx
-                        .as_ref()
                 }
                 .vmctx
                 .as_ptr(),
@@ -205,8 +203,6 @@ impl Instance {
                 LocalOrImport::Local(_) => self.inner.vmctx,
                 LocalOrImport::Import(imported_func_index) => unsafe {
                     self.inner.import_backing.vm_functions[imported_func_index]
-                        .func_ctx
-                        .as_ref()
                 }
                 .vmctx
                 .as_ptr(),
@@ -230,8 +226,8 @@ impl Instance {
                     let imported_func = &self.inner.import_backing.vm_functions[import_func_index];
 
                     (
-                        NonNull::new(imported_func.func as *mut _).unwrap(),
-                        unsafe { imported_func.func_ctx.as_ref() }.func_env,
+                        NonNull::new(imported_func.func_env as *mut _).unwrap(),
+                        unsafe { imported_func.func_ctx }.func_env,
                     )
                 }
             };
