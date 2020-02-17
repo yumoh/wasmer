@@ -369,8 +369,7 @@ fn test_fn_mvr() {
             (result, expected_value) => assert!(
                 false,
                 format!(
-                    "Unexpected assertion for `{}`: left = `{:?}`, right = `{:?}`.",
-                    stringify!($function),
+                    "Unexpected assertion for `function_mvr`: left = `{:?}`, right = `{:?}`.",
                     result,
                     expected_value
                 )
