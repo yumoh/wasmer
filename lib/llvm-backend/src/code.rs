@@ -4,17 +4,19 @@ use crate::{
     read_info::{blocktype_to_param_types, blocktype_to_types},
     stackmap::{StackmapEntry, StackmapEntryKind, StackmapRegistry, ValueSemantic},
     state::{ControlFrame, ExtraInfo, IfElseState, State},
-    trampolines::generate_trampolines,
+    trampolines::{generate_trampolines, rets_from_call, type_to_llvm},
     LLVMBackendConfig, LLVMCallbacks,
 };
 use inkwell::{
+    attributes::{Attribute, AttributeLoc},
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
     passes::PassManager,
     targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
     types::{
-        BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
+        BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, StructType,
+        VectorType,
     },
     values::{
         BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PhiValue, PointerValue,
@@ -55,33 +57,115 @@ fn func_sig_to_llvm<'ctx>(
 ) -> FunctionType<'ctx> {
     let user_param_types = sig.params().iter().map(|&ty| type_to_llvm(intrinsics, ty));
 
-    let param_types: Vec<_> = std::iter::once(intrinsics.ctx_ptr_ty.as_basic_type_enum())
-        .chain(user_param_types)
-        .collect();
+    let param_types =
+        std::iter::once(intrinsics.ctx_ptr_ty.as_basic_type_enum()).chain(user_param_types);
 
-    match sig.returns() {
-        &[] => intrinsics.void_ty.fn_type(&param_types, false),
-        &[single_value] => type_to_llvm(intrinsics, single_value).fn_type(&param_types, false),
-        returns @ _ => {
-            let basic_types: Vec<_> = returns
+    let sig_returns_bitwidths = sig
+        .returns()
+        .iter()
+        .map(|ty| match ty {
+            Type::I32 | Type::F32 => 32,
+            Type::I64 | Type::F64 => 64,
+            Type::V128 => 128,
+        })
+        .collect::<Vec<i32>>();
+
+    match sig_returns_bitwidths.as_slice() {
+        [] => intrinsics
+            .void_ty
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [_] => {
+            let single_value = sig.returns()[0];
+            type_to_llvm(intrinsics, single_value).fn_type(&param_types.collect::<Vec<_>>(), false)
+        }
+        [32, 64] | [64, 32] | [64, 64] => {
+            let basic_types: Vec<_> = sig
+                .returns()
                 .iter()
                 .map(|&ty| type_to_llvm(intrinsics, ty))
                 .collect();
 
             context
                 .struct_type(&basic_types, false)
-                .fn_type(&param_types, false)
+                .fn_type(&param_types.collect::<Vec<_>>(), false)
         }
-    }
-}
+        [32, 32] if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 => intrinsics
+            .f32_ty
+            .vec_type(2)
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [32, 32] => intrinsics
+            .i64_ty
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [32, 32, _] if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 => context
+            .struct_type(
+                &[
+                    intrinsics.f32_ty.vec_type(2).as_basic_type_enum(),
+                    type_to_llvm(intrinsics, sig.returns()[2]),
+                ],
+                false,
+            )
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [32, 32, _] => context
+            .struct_type(
+                &[
+                    intrinsics.i64_ty.as_basic_type_enum(),
+                    type_to_llvm(intrinsics, sig.returns()[2]),
+                ],
+                false,
+            )
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [64, 32, 32] if sig.returns()[1] == Type::F32 && sig.returns()[2] == Type::F32 => context
+            .struct_type(
+                &[
+                    type_to_llvm(intrinsics, sig.returns()[0]),
+                    intrinsics.f32_ty.vec_type(2).as_basic_type_enum(),
+                ],
+                false,
+            )
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [64, 32, 32] => context
+            .struct_type(
+                &[
+                    type_to_llvm(intrinsics, sig.returns()[0]),
+                    intrinsics.i64_ty.as_basic_type_enum(),
+                ],
+                false,
+            )
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        [32, 32, 32, 32] => context
+            .struct_type(
+                &[
+                    if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 {
+                        intrinsics.f32_ty.vec_type(2).as_basic_type_enum()
+                    } else {
+                        intrinsics.i64_ty.as_basic_type_enum()
+                    },
+                    if sig.returns()[2] == Type::F32 && sig.returns()[3] == Type::F32 {
+                        intrinsics.f32_ty.vec_type(2).as_basic_type_enum()
+                    } else {
+                        intrinsics.i64_ty.as_basic_type_enum()
+                    },
+                ],
+                false,
+            )
+            .fn_type(&param_types.collect::<Vec<_>>(), false),
+        _ => {
+            let basic_types: Vec<_> = sig
+                .returns()
+                .iter()
+                .map(|&ty| type_to_llvm(intrinsics, ty))
+                .collect();
 
-fn type_to_llvm<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> BasicTypeEnum<'ctx> {
-    match ty {
-        Type::I32 => intrinsics.i32_ty.as_basic_type_enum(),
-        Type::I64 => intrinsics.i64_ty.as_basic_type_enum(),
-        Type::F32 => intrinsics.f32_ty.as_basic_type_enum(),
-        Type::F64 => intrinsics.f64_ty.as_basic_type_enum(),
-        Type::V128 => intrinsics.i128_ty.as_basic_type_enum(),
+            let sret = context
+                .struct_type(&basic_types, false)
+                .ptr_type(AddressSpace::Generic);
+
+            let param_types = std::iter::once(sret.as_basic_type_enum()).chain(param_types);
+
+            intrinsics
+                .void_ty
+                .fn_type(&param_types.collect::<Vec<_>>(), false)
+        }
     }
 }
 
@@ -1902,37 +1986,56 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 let sigindex = info.func_assoc[func_index];
                 let llvm_sig = signatures[sigindex];
                 let func_sig = &info.signatures[sigindex];
+                let sret = if llvm_sig.get_return_type().is_none() && func_sig.returns().len() > 1 {
+                    Some(
+                        self.alloca_builder.as_ref().unwrap().build_alloca(
+                            llvm_sig.get_param_types()[0]
+                                .into_pointer_type()
+                                .get_element_type()
+                                .into_struct_type(),
+                            "sret",
+                        ),
+                    )
+                } else {
+                    None
+                };
 
                 let (params, func_ptr) = match func_index.local_or_import(info) {
                     LocalOrImport::Local(_) => {
-                        let params: Vec<_> = std::iter::once(ctx.basic())
-                            .chain(
-                                state
-                                    .peekn_extra(func_sig.params().len())?
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, (v, info))| match func_sig.params()[i] {
-                                        Type::F32 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f32_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::F64 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f64_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::V128 => apply_pending_canonicalization(
+                        let params = std::iter::once(ctx.basic()).chain(
+                            state
+                                .peekn_extra(func_sig.params().len())?
+                                .iter()
+                                .enumerate()
+                                .map(|(i, (v, info))| match func_sig.params()[i] {
+                                    Type::F32 => builder.build_bitcast(
+                                        apply_pending_canonicalization(
                                             builder, intrinsics, *v, *info,
                                         ),
-                                        _ => *v,
-                                    }),
-                            )
-                            .collect();
+                                        intrinsics.f32_ty,
+                                        &state.var_name(),
+                                    ),
+                                    Type::F64 => builder.build_bitcast(
+                                        apply_pending_canonicalization(
+                                            builder, intrinsics, *v, *info,
+                                        ),
+                                        intrinsics.f64_ty,
+                                        &state.var_name(),
+                                    ),
+                                    Type::V128 => apply_pending_canonicalization(
+                                        builder, intrinsics, *v, *info,
+                                    ),
+                                    _ => *v,
+                                }),
+                        );
+
+                        let params: Vec<_> = if sret.is_some() {
+                            std::iter::once(sret.unwrap().as_basic_value_enum())
+                                .chain(params)
+                                .collect()
+                        } else {
+                            params.collect()
+                        };
 
                         let func_ptr = self.llvm_functions.borrow_mut()[&func_index];
 
@@ -1942,34 +2045,40 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         let (func_ptr_untyped, ctx_ptr) =
                             ctx.imported_func(import_func_index, intrinsics, self.module.clone());
 
-                        let params: Vec<_> = std::iter::once(ctx_ptr.as_basic_value_enum())
-                            .chain(
-                                state
-                                    .peekn_extra(func_sig.params().len())?
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, (v, info))| match func_sig.params()[i] {
-                                        Type::F32 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f32_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::F64 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f64_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::V128 => apply_pending_canonicalization(
+                        let params = std::iter::once(ctx_ptr.as_basic_value_enum()).chain(
+                            state
+                                .peekn_extra(func_sig.params().len())?
+                                .iter()
+                                .enumerate()
+                                .map(|(i, (v, info))| match func_sig.params()[i] {
+                                    Type::F32 => builder.build_bitcast(
+                                        apply_pending_canonicalization(
                                             builder, intrinsics, *v, *info,
                                         ),
-                                        _ => *v,
-                                    }),
-                            )
-                            .collect();
+                                        intrinsics.f32_ty,
+                                        &state.var_name(),
+                                    ),
+                                    Type::F64 => builder.build_bitcast(
+                                        apply_pending_canonicalization(
+                                            builder, intrinsics, *v, *info,
+                                        ),
+                                        intrinsics.f64_ty,
+                                        &state.var_name(),
+                                    ),
+                                    Type::V128 => apply_pending_canonicalization(
+                                        builder, intrinsics, *v, *info,
+                                    ),
+                                    _ => *v,
+                                }),
+                        );
+
+                        let params: Vec<_> = if sret.is_some() {
+                            std::iter::once(sret.unwrap().as_basic_value_enum())
+                                .chain(params)
+                                .collect()
+                        } else {
+                            params.collect()
+                        };
 
                         let func_ptr_ty = llvm_sig.ptr_type(AddressSpace::Generic);
                         let func_ptr = builder.build_pointer_cast(
@@ -2001,6 +2110,14 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                     }
                 }
                 let call_site = builder.build_call(func_ptr, &params, &state.var_name());
+                if sret.is_some() {
+                    call_site.add_attribute(
+                        AttributeLoc::Param(0),
+                        self.context
+                            .unwrap()
+                            .create_enum_attribute(Attribute::get_named_enum_kind_id("sret"), 0),
+                    );
+                }
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2014,22 +2131,9 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
-
-                if let Some(basic_value) = call_site.try_as_basic_value().left() {
-                    match func_sig.returns().len() {
-                        1 => state.push1(basic_value),
-                        count @ _ => {
-                            // This is a multi-value return.
-                            let struct_value = basic_value.into_struct_value();
-                            for i in 0..(count as u32) {
-                                let value = builder
-                                    .build_extract_value(struct_value, i, &state.var_name())
-                                    .unwrap();
-                                state.push1(value);
-                            }
-                        }
-                    }
-                }
+                rets_from_call(context, builder, intrinsics, call_site, func_sig)
+                    .iter()
+                    .for_each(|ret| state.push1(*ret));
             }
             Operator::CallIndirect { index, table_index } => {
                 let sig_index = SigIndex::new(index as usize);
@@ -8604,14 +8708,67 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
 
     fn finalize(&mut self) -> Result<(), CodegenError> {
         let results = self.state.popn_save_extra(self.func_sig.returns().len())?;
+        let builder = self.builder.as_ref().unwrap();
+        let intrinsics = self.intrinsics.as_ref().unwrap();
+
+        let is_32 = |value: &BasicValueEnum| {
+            (value.is_int_value() && value.into_int_value().get_type() == intrinsics.i32_ty)
+                || (value.is_float_value()
+                    && value.into_float_value().get_type() == intrinsics.f32_ty)
+        };
+        let is_64 = |value: &BasicValueEnum| {
+            (value.is_int_value() && value.into_int_value().get_type() == intrinsics.i64_ty)
+                || (value.is_float_value()
+                    && value.into_float_value().get_type() == intrinsics.f64_ty)
+        };
+        let is_f32 = |value: &BasicValueEnum| {
+            value.is_float_value() && value.into_float_value().get_type() == intrinsics.f32_ty
+        };
+
+        let pack_i32s = |low: IntValue<'ctx>, high: IntValue<'ctx>| {
+            assert!(low.get_type() == intrinsics.i32_ty);
+            assert!(high.get_type() == intrinsics.i32_ty);
+            let low = builder.build_int_z_extend(low, intrinsics.i64_ty, &self.state.var_name());
+            let high = builder.build_int_z_extend(high, intrinsics.i64_ty, &self.state.var_name());
+            let high = builder.build_left_shift(
+                high,
+                intrinsics.i64_ty.const_int(32, false),
+                &self.state.var_name(),
+            );
+            builder.build_or(low, high, &self.state.var_name())
+        };
+
+        let pack_f32s = |first: FloatValue<'ctx>, second: FloatValue<'ctx>| -> VectorValue<'ctx> {
+            assert!(first.get_type() == intrinsics.f32_ty);
+            assert!(second.get_type() == intrinsics.f32_ty);
+            let vec_ty = intrinsics.f32_ty.vec_type(2);
+            let vec =
+                builder.build_insert_element(vec_ty.get_undef(), first, intrinsics.i32_zero, "");
+            let vec = builder.build_insert_element(
+                vec,
+                second,
+                intrinsics.i32_ty.const_int(1, false),
+                "",
+            );
+            vec
+        };
+
+        let build_struct = |ty: StructType<'ctx>, values: &[BasicValueEnum<'ctx>]| {
+            let mut struct_value = ty.get_undef();
+            for (i, v) in values.iter().enumerate() {
+                struct_value = builder
+                    .build_insert_value(struct_value, *v, i as u32, &self.state.var_name())
+                    .unwrap()
+                    .into_struct_value();
+            }
+            struct_value
+        };
 
         match results.as_slice() {
             [] => {
                 self.builder.as_ref().unwrap().build_return(None);
             }
             [(one_value, one_value_info)] => {
-                let builder = self.builder.as_ref().unwrap();
-                let intrinsics = self.intrinsics.as_ref().unwrap();
                 let one_value = apply_pending_canonicalization(
                     builder,
                     intrinsics,
@@ -8624,14 +8781,160 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                     "return",
                 )));
             }
+            [(v1, v1i), (v2, v2i)] if is_f32(v1) && is_f32(v2) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i)
+                    .into_float_value();
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i)
+                    .into_float_value();
+                let ret = pack_f32s(v1, v2);
+                builder.build_return(Some(&ret));
+            }
+            [(v1, v1i), (v2, v2i)] if is_32(v1) && is_32(v2) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i);
+                let v1 = builder
+                    .build_bitcast(v1, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let v2 = builder
+                    .build_bitcast(v2, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let ret = pack_i32s(v1, v2);
+                builder.build_return(Some(&ret));
+            }
+            [(v1, v1i), (v2, v2i)] => {
+                assert!(!(is_32(v1) && is_32(v2)));
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i);
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[v1, v2],
+                );
+                builder.build_return(Some(&struct_value));
+            }
+            [(v1, v1i), (v2, v2i), (v3, v3i)] if is_f32(&v1) && is_f32(&v2) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i)
+                    .into_float_value();
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i)
+                    .into_float_value();
+                let v3 = apply_pending_canonicalization(builder, intrinsics, *v3, *v3i);
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[pack_f32s(v1, v2).as_basic_value_enum(), v3],
+                );
+                builder.build_return(Some(&struct_value));
+            }
+            [(v1, v1i), (v2, v2i), (v3, v3i)] if is_32(&v1) && is_32(&v2) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i);
+                let v3 = apply_pending_canonicalization(builder, intrinsics, *v3, *v3i);
+                let v1 = builder
+                    .build_bitcast(v1, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let v2 = builder
+                    .build_bitcast(v2, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[pack_i32s(v1, v2).as_basic_value_enum(), v3],
+                );
+                builder.build_return(Some(&struct_value));
+            }
+            [(v1, v1i), (v2, v2i), (v3, v3i)] if is_64(&v1) && is_f32(&v2) && is_f32(&v3) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i)
+                    .into_float_value();
+                let v3 = apply_pending_canonicalization(builder, intrinsics, *v3, *v3i)
+                    .into_float_value();
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[v1, pack_f32s(v2, v3).as_basic_value_enum()],
+                );
+                builder.build_return(Some(&struct_value));
+            }
+            [(v1, v1i), (v2, v2i), (v3, v3i)] if is_64(&v1) && is_32(&v2) && is_32(&v3) => {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i);
+                let v3 = apply_pending_canonicalization(builder, intrinsics, *v3, *v3i);
+                let v2 = builder
+                    .build_bitcast(v2, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let v3 = builder
+                    .build_bitcast(v3, intrinsics.i32_ty, "")
+                    .into_int_value();
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[v1, pack_i32s(v2, v3).as_basic_value_enum()],
+                );
+                builder.build_return(Some(&struct_value));
+            }
+            [(v1, v1i), (v2, v2i), (v3, v3i), (v4, v4i)]
+                if is_32(v1) && is_32(v2) && is_32(v3) && is_32(v4) =>
+            {
+                let v1 = apply_pending_canonicalization(builder, intrinsics, *v1, *v1i);
+                let v2 = apply_pending_canonicalization(builder, intrinsics, *v2, *v2i);
+                let v3 = apply_pending_canonicalization(builder, intrinsics, *v3, *v3i);
+                let v4 = apply_pending_canonicalization(builder, intrinsics, *v4, *v4i);
+                let v1v2_pack = if is_f32(&v1) && is_f32(&v2) {
+                    pack_f32s(v1.into_float_value(), v2.into_float_value()).into()
+                } else {
+                    let v1 = builder
+                        .build_bitcast(v1, intrinsics.i32_ty, "")
+                        .into_int_value();
+                    let v2 = builder
+                        .build_bitcast(v2, intrinsics.i32_ty, "")
+                        .into_int_value();
+                    pack_i32s(v1, v2).into()
+                };
+                let v3v4_pack = if is_f32(&v3) && is_f32(&v4) {
+                    pack_f32s(v3.into_float_value(), v4.into_float_value()).into()
+                } else {
+                    let v3 = builder
+                        .build_bitcast(v3, intrinsics.i32_ty, "")
+                        .into_int_value();
+                    let v4 = builder
+                        .build_bitcast(v4, intrinsics.i32_ty, "")
+                        .into_int_value();
+                    pack_i32s(v3, v4).into()
+                };
+                let struct_value = build_struct(
+                    self.function
+                        .get_type()
+                        .get_return_type()
+                        .unwrap()
+                        .into_struct_type(),
+                    &[v1v2_pack, v3v4_pack],
+                );
+                builder.build_return(Some(&struct_value));
+            }
             results @ _ => {
-                let builder = self.builder.as_ref().unwrap();
-                let intrinsics = self.intrinsics.as_ref().unwrap();
-                let mut struct_value = self
+                let sret = self
                     .function
-                    .get_type()
-                    .get_return_type()
+                    .get_first_param()
                     .unwrap()
+                    .into_pointer_value();
+                let mut struct_value = sret
+                    .get_type()
+                    .get_element_type()
                     .into_struct_type()
                     .get_undef();
                 let mut idx = 0;
@@ -8649,7 +8952,8 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         .into_struct_value();
                     idx = idx + 1;
                 }
-                builder.build_return(Some(&struct_value));
+                builder.build_store(sret, struct_value);
+                builder.build_return(None);
             }
         }
         Ok(())
@@ -8838,7 +9142,15 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         locals.extend(
             function
                 .get_param_iter()
-                .skip(1)
+                .skip(
+                    if function.get_type().get_return_type().is_none()
+                        && func_sig.returns().len() > 1
+                    {
+                        2
+                    } else {
+                        1
+                    },
+                )
                 .enumerate()
                 .map(|(index, param)| {
                     let real_ty = func_sig.params()[index];
@@ -9032,6 +9344,15 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
                     self.signatures[*sig_id],
                     Some(Linkage::External),
                 );
+                let func_sig = &self.signatures_raw[*sig_id];
+                if function.get_type().get_return_type().is_none() && func_sig.returns().len() > 1 {
+                    function.add_attribute(
+                        AttributeLoc::Param(0),
+                        self.context
+                            .unwrap()
+                            .create_enum_attribute(Attribute::get_named_enum_kind_id("sret"), 0),
+                    );
+                }
                 self.llvm_functions.borrow_mut().insert(index, function);
             }
         }
