@@ -1,10 +1,11 @@
 use crate::{
+    abi,
     backend::LLVMBackend,
     intrinsics::{tbaa_label, CtxType, GlobalCache, Intrinsics, MemoryCache},
     read_info::{blocktype_to_param_types, blocktype_to_types},
     stackmap::{StackmapEntry, StackmapEntryKind, StackmapRegistry, ValueSemantic},
     state::{ControlFrame, ExtraInfo, IfElseState, State},
-    trampolines::{generate_trampolines, rets_from_call, type_to_llvm},
+    trampolines::{generate_trampolines, type_to_llvm},
     LLVMBackendConfig, LLVMCallbacks,
 };
 use inkwell::{
@@ -48,126 +49,6 @@ use wasmer_runtime_core::{
 use wasmparser::{BinaryReaderError, MemoryImmediate, Operator, Type as WpType};
 
 static BACKEND_ID: &str = "llvm";
-
-fn func_sig_to_llvm<'ctx>(
-    context: &'ctx Context,
-    intrinsics: &Intrinsics<'ctx>,
-    sig: &FuncSig,
-    type_to_llvm: fn(intrinsics: &Intrinsics<'ctx>, ty: Type) -> BasicTypeEnum<'ctx>,
-) -> FunctionType<'ctx> {
-    let user_param_types = sig.params().iter().map(|&ty| type_to_llvm(intrinsics, ty));
-
-    let param_types =
-        std::iter::once(intrinsics.ctx_ptr_ty.as_basic_type_enum()).chain(user_param_types);
-
-    let sig_returns_bitwidths = sig
-        .returns()
-        .iter()
-        .map(|ty| match ty {
-            Type::I32 | Type::F32 => 32,
-            Type::I64 | Type::F64 => 64,
-            Type::V128 => 128,
-        })
-        .collect::<Vec<i32>>();
-
-    match sig_returns_bitwidths.as_slice() {
-        [] => intrinsics
-            .void_ty
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [_] => {
-            let single_value = sig.returns()[0];
-            type_to_llvm(intrinsics, single_value).fn_type(&param_types.collect::<Vec<_>>(), false)
-        }
-        [32, 64] | [64, 32] | [64, 64] => {
-            let basic_types: Vec<_> = sig
-                .returns()
-                .iter()
-                .map(|&ty| type_to_llvm(intrinsics, ty))
-                .collect();
-
-            context
-                .struct_type(&basic_types, false)
-                .fn_type(&param_types.collect::<Vec<_>>(), false)
-        }
-        [32, 32] if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 => intrinsics
-            .f32_ty
-            .vec_type(2)
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [32, 32] => intrinsics
-            .i64_ty
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [32, 32, _] if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 => context
-            .struct_type(
-                &[
-                    intrinsics.f32_ty.vec_type(2).as_basic_type_enum(),
-                    type_to_llvm(intrinsics, sig.returns()[2]),
-                ],
-                false,
-            )
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [32, 32, _] => context
-            .struct_type(
-                &[
-                    intrinsics.i64_ty.as_basic_type_enum(),
-                    type_to_llvm(intrinsics, sig.returns()[2]),
-                ],
-                false,
-            )
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [64, 32, 32] if sig.returns()[1] == Type::F32 && sig.returns()[2] == Type::F32 => context
-            .struct_type(
-                &[
-                    type_to_llvm(intrinsics, sig.returns()[0]),
-                    intrinsics.f32_ty.vec_type(2).as_basic_type_enum(),
-                ],
-                false,
-            )
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [64, 32, 32] => context
-            .struct_type(
-                &[
-                    type_to_llvm(intrinsics, sig.returns()[0]),
-                    intrinsics.i64_ty.as_basic_type_enum(),
-                ],
-                false,
-            )
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        [32, 32, 32, 32] => context
-            .struct_type(
-                &[
-                    if sig.returns()[0] == Type::F32 && sig.returns()[1] == Type::F32 {
-                        intrinsics.f32_ty.vec_type(2).as_basic_type_enum()
-                    } else {
-                        intrinsics.i64_ty.as_basic_type_enum()
-                    },
-                    if sig.returns()[2] == Type::F32 && sig.returns()[3] == Type::F32 {
-                        intrinsics.f32_ty.vec_type(2).as_basic_type_enum()
-                    } else {
-                        intrinsics.i64_ty.as_basic_type_enum()
-                    },
-                ],
-                false,
-            )
-            .fn_type(&param_types.collect::<Vec<_>>(), false),
-        _ => {
-            let basic_types: Vec<_> = sig
-                .returns()
-                .iter()
-                .map(|&ty| type_to_llvm(intrinsics, ty))
-                .collect();
-
-            let sret = context
-                .struct_type(&basic_types, false)
-                .ptr_type(AddressSpace::Generic);
-
-            let param_types = std::iter::once(sret.as_basic_type_enum()).chain(param_types);
-
-            intrinsics
-                .void_ty
-                .fn_type(&param_types.collect::<Vec<_>>(), false)
-        }
-    }
-}
 
 // Create a vector where each lane contains the same value.
 fn splat_vector<'ctx>(
@@ -1041,7 +922,7 @@ pub struct LLVMModuleCodeGenerator<'ctx> {
     builder: Option<Builder<'ctx>>,
     intrinsics: Option<Intrinsics<'ctx>>,
     functions: Vec<LLVMFunctionCodeGenerator<'ctx>>,
-    signatures: Map<SigIndex, FunctionType<'ctx>>,
+    signatures: Map<SigIndex, (FunctionType<'ctx>, Vec<(Attribute, AttributeLoc)>)>,
     function_signatures: Option<Arc<Map<FuncIndex, SigIndex>>>,
     llvm_functions: Rc<RefCell<HashMap<FuncIndex, FunctionValue<'ctx>>>>,
     func_import_count: usize,
@@ -1062,7 +943,7 @@ pub struct LLVMFunctionCodeGenerator<'ctx> {
     llvm_functions: Rc<RefCell<HashMap<FuncIndex, FunctionValue<'ctx>>>>,
     function: FunctionValue<'ctx>,
     func_sig: FuncSig,
-    signatures: Map<SigIndex, FunctionType<'ctx>>,
+    signatures: Map<SigIndex, (FunctionType<'ctx>, Vec<(Attribute, AttributeLoc)>)>,
     locals: Vec<PointerValue<'ctx>>, // Contains params and locals
     num_params: usize,
     ctx: Option<CtxType<'static, 'ctx>>,
@@ -1984,7 +1865,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
             Operator::Call { function_index } => {
                 let func_index = FuncIndex::new(function_index as usize);
                 let sigindex = info.func_assoc[func_index];
-                let llvm_sig = signatures[sigindex];
+                let (llvm_sig, llvm_attrs) = &signatures[sigindex];
                 let func_sig = &info.signatures[sigindex];
                 let sret = if llvm_sig.get_return_type().is_none() && func_sig.returns().len() > 1 {
                     Some(
@@ -2110,14 +1991,10 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                     }
                 }
                 let call_site = builder.build_call(func_ptr, &params, &state.var_name());
-                if sret.is_some() {
-                    call_site.add_attribute(
-                        AttributeLoc::Param(0),
-                        self.context
-                            .unwrap()
-                            .create_enum_attribute(Attribute::get_named_enum_kind_id("sret"), 0),
-                    );
+                for (attr, attr_loc) in llvm_attrs {
+                    call_site.add_attribute(*attr_loc, *attr);
                 }
+
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2131,7 +2008,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
-                rets_from_call(context, builder, intrinsics, call_site, func_sig)
+                abi::rets_from_call(builder, intrinsics, call_site, func_sig)
                     .iter()
                     .for_each(|ret| state.push1(*ret));
             }
@@ -2272,30 +2149,48 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 builder.position_at_end(continue_block);
 
                 let wasmer_fn_sig = &info.signatures[sig_index];
-                let fn_ty = signatures[sig_index];
+                let (fn_ty, fn_attrs) = &signatures[sig_index];
 
                 let pushed_args = state.popn_save_extra(wasmer_fn_sig.params().len())?;
 
-                let args: Vec<_> = std::iter::once(ctx_ptr)
-                    .chain(pushed_args.into_iter().enumerate().map(|(i, (v, info))| {
-                        match wasmer_fn_sig.params()[i] {
-                            Type::F32 => builder.build_bitcast(
-                                apply_pending_canonicalization(builder, intrinsics, v, info),
-                                intrinsics.f32_ty,
-                                &state.var_name(),
-                            ),
-                            Type::F64 => builder.build_bitcast(
-                                apply_pending_canonicalization(builder, intrinsics, v, info),
-                                intrinsics.f64_ty,
-                                &state.var_name(),
-                            ),
-                            Type::V128 => {
-                                apply_pending_canonicalization(builder, intrinsics, v, info)
-                            }
-                            _ => v,
-                        }
-                    }))
-                    .collect();
+                let args = std::iter::once(ctx_ptr).chain(pushed_args.into_iter().enumerate().map(
+                    |(i, (v, info))| match wasmer_fn_sig.params()[i] {
+                        Type::F32 => builder.build_bitcast(
+                            apply_pending_canonicalization(builder, intrinsics, v, info),
+                            intrinsics.f32_ty,
+                            &state.var_name(),
+                        ),
+                        Type::F64 => builder.build_bitcast(
+                            apply_pending_canonicalization(builder, intrinsics, v, info),
+                            intrinsics.f64_ty,
+                            &state.var_name(),
+                        ),
+                        Type::V128 => apply_pending_canonicalization(builder, intrinsics, v, info),
+                        _ => v,
+                    },
+                ));
+
+                let sret = if fn_ty.get_return_type().is_none() && wasmer_fn_sig.returns().len() > 1
+                {
+                    Some(
+                        self.alloca_builder.as_ref().unwrap().build_alloca(
+                            fn_ty.get_param_types()[0]
+                                .into_pointer_type()
+                                .get_element_type()
+                                .into_struct_type(),
+                            "sret",
+                        ),
+                    )
+                } else {
+                    None
+                };
+                let args: Vec<_> = if sret.is_some() {
+                    std::iter::once(sret.unwrap().as_basic_value_enum())
+                        .chain(args)
+                        .collect()
+                } else {
+                    args.collect()
+                };
 
                 let typed_func_ptr = builder.build_pointer_cast(
                     func_ptr,
@@ -2320,7 +2215,13 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
+                dbg!(&typed_func_ptr);
+                dbg!(&args);
                 let call_site = builder.build_call(typed_func_ptr, &args, "indirect_call");
+                for (attr, attr_loc) in fn_attrs {
+                    call_site.add_attribute(*attr_loc, *attr);
+                }
+
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2334,22 +2235,9 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
-
-                if let Some(basic_value) = call_site.try_as_basic_value().left() {
-                    match wasmer_fn_sig.returns().len() {
-                        1 => state.push1(basic_value),
-                        count @ _ => {
-                            // This is a multi-value return.
-                            let struct_value = basic_value.into_struct_value();
-                            for i in 0..(count as u32) {
-                                let value = builder
-                                    .build_extract_value(struct_value, i, &state.var_name())
-                                    .unwrap();
-                                state.push1(value);
-                            }
-                        }
-                    }
-                }
+                abi::rets_from_call(builder, intrinsics, call_site, wasmer_fn_sig)
+                    .iter()
+                    .for_each(|ret| state.push1(*ret));
             }
 
             /***************************
@@ -9322,11 +9210,10 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         self.signatures = signatures
             .iter()
             .map(|(_, sig)| {
-                func_sig_to_llvm(
+                abi::func_sig_to_llvm(
                     self.context.as_ref().unwrap(),
                     self.intrinsics.as_ref().unwrap(),
                     sig,
-                    type_to_llvm,
                 )
             })
             .collect();
@@ -9339,19 +9226,15 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
     ) -> Result<(), CodegenError> {
         for (index, sig_id) in &assoc {
             if index.index() >= self.func_import_count {
+                let (llvm_ty, llvm_attrs) = &self.signatures[*sig_id];
+
                 let function = self.module.borrow_mut().add_function(
                     &format!("fn{}", index.index()),
-                    self.signatures[*sig_id],
+                    *llvm_ty,
                     Some(Linkage::External),
                 );
-                let func_sig = &self.signatures_raw[*sig_id];
-                if function.get_type().get_return_type().is_none() && func_sig.returns().len() > 1 {
-                    function.add_attribute(
-                        AttributeLoc::Param(0),
-                        self.context
-                            .unwrap()
-                            .create_enum_attribute(Attribute::get_named_enum_kind_id("sret"), 0),
-                    );
+                for (attr, attr_loc) in llvm_attrs {
+                    function.add_attribute(*attr_loc, *attr);
                 }
                 self.llvm_functions.borrow_mut().insert(index, function);
             }

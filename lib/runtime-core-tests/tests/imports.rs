@@ -14,8 +14,8 @@ use wasmer_runtime_core::{
 use wasmer_runtime_core_tests::{get_compiler, wat2wasm_with_features};
 
 macro_rules! call_and_assert {
-    ($instance:ident, $function:ident, $expected_value:expr) => {
-        let $function: Func<i32, i32> = $instance.func(stringify!($function)).unwrap();
+    ($instance:ident, $function:ident, $return_type:ty, $expected_value:expr) => {
+        let $function: Func<i32, $return_type> = $instance.func(stringify!($function)).unwrap();
 
         let result = $function.call(1);
 
@@ -74,7 +74,8 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
     const MODULE: &str = r#"
 (module
   (type $type (func (param i32) (result i32)))
-  (type $multi_value_return_type (func (param i32) (result i32 i32 i32)))
+  (type $multi_value_return_type_3xi32 (func (param i32) (result i32 i32 i32)))
+  (type $multi_value_return_type_2xf32 (func (param i32) (result f32 f32)))
   (import "env" "memory" (memory 1 1))
   (import "env" "callback_fn" (func $callback_fn (type $type)))
   (import "env" "callback_closure" (func $callback_closure (type $type)))
@@ -88,7 +89,6 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
   (import "env" "callback_fn_trap_with_vmctx" (func $callback_fn_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx" (func $callback_closure_trap_with_vmctx (type $type)))
   (import "env" "callback_closure_trap_with_vmctx_and_env" (func $callback_closure_trap_with_vmctx_and_env (type $type)))
-  (import "env" "callback_fn_mvr" (func $callback_fn_mvr (type $multi_value_return_type)))
 
   (func (export "function_fn") (type $type)
     get_local 0
@@ -136,11 +136,7 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
   (func (export "function_closure_trap_with_vmctx_and_env") (type $type)
     get_local 0
-    call $callback_closure_trap_with_vmctx_and_env)
-
-  (func (export "function_mvr") (type $multi_value_return_type)
-    get_local 0
-    call $callback_fn_mvr))
+    call $callback_closure_trap_with_vmctx_and_env))
 "#;
 
     let mut features = wabt::Features::new();
@@ -238,9 +234,6 @@ fn imported_functions_forms(test: &dyn Fn(&Instance)) {
 
                 Err(format!("! {}", shift_ + n + 1))
             }),
-
-            // Multiple return value function.
-            "callback_fn_mvr" => Func::new(callback_fn_mvr),
         },
     };
     let instance = module.instantiate(&import_object).unwrap();
@@ -270,21 +263,18 @@ fn callback_fn_trap_with_vmctx(vmctx: &mut vm::Ctx, n: i32) -> Result<i32, Strin
     Err(format!("baz {}", shift_ + n + 1))
 }
 
-fn callback_fn_mvr(vmctx: &mut vm::Ctx, n: i32) -> Result<(i32, i32, i32), ()> {
-    Ok((n, n + 1, n + 2))
-}
-
 macro_rules! test {
-    ($test_name:ident, $function:ident, $expected_value:expr) => {
+    ($test_name:ident, $function:ident, $return_type:ty, $expected_value:expr) => {
         #[test]
         fn $test_name() {
             imported_functions_forms(&|instance| {
-                call_and_assert!(instance, $function, $expected_value);
+                call_and_assert!(instance, $function, $return_type, $expected_value);
             });
         }
     };
 }
 
+<<<<<<< HEAD
 test!(test_fn, function_fn, Ok(2));
 test!(test_closure, function_closure, Ok(2));
 test!(test_closure_dynamic, function_closure_dynamic, Ok(2));
@@ -294,86 +284,194 @@ test!(
     Ok(2 + shift + SHIFT)
 );
 test!(test_fn_with_vmctx, function_fn_with_vmctx, Ok(2 + SHIFT));
+=======
+test!(test_fn, function_fn, i32, Ok(2));
+>>>>>>> f9d839212... Initial commit of refactored ABI support in LLVM backend. Also MVR tests.
 test!(
-    test_closure_with_vmctx,
-    function_closure_with_vmctx,
+    test_fn_with_vmctx,
+    function_fn_with_vmctx,
+    i32,
     Ok(2 + SHIFT)
-);
-test!(
-    test_closure_with_vmctx_and_env,
-    function_closure_with_vmctx_and_env,
-    Ok(2 + shift + SHIFT)
 );
 test!(
     test_fn_trap,
     function_fn_trap,
+    i32,
     Err(RuntimeError(Box::new(format!("foo {}", 2))))
 );
 test!(
     test_closure_trap,
     function_closure_trap,
+    i32,
     Err(RuntimeError(Box::new(format!("bar {}", 2))))
 );
 test!(
     test_fn_trap_with_vmctx,
     function_fn_trap_with_vmctx,
+    i32,
     Err(RuntimeError(Box::new(format!("baz {}", 2 + SHIFT))))
 );
 test!(
     test_closure_trap_with_vmctx,
     function_closure_trap_with_vmctx,
+    i32,
     Err(RuntimeError(Box::new(format!("qux {}", 2 + SHIFT))))
 );
 test!(
     test_closure_trap_with_vmctx_and_env,
     function_closure_trap_with_vmctx_and_env,
+    i32,
     Err(RuntimeError(Box::new(format!("! {}", 2 + shift + SHIFT))))
 );
 
-#[test]
-// Known broken.
-#[ignore]
-fn test_fn_mvr() {
-    imported_functions_forms(&|instance| {
-        let function_mvr: Func<i32, (i32, i32, i32)> = instance.func("function_mvr").unwrap();
-
-        let result = function_mvr.call(1);
-
-        match (result, Ok((1, 2, 3))) {
-            (Ok(value), expected_value) => assert_eq!(
-                Ok(value),
-                expected_value,
-                concat!("Expected right when calling `function_mvr`.")
-            ),
-            (Err(RuntimeError(data)), Err(RuntimeError(expected_data))) => {
-                if let (Some(data), Some(expected_data)) = (
-                    data.downcast_ref::<&str>(),
-                    expected_data.downcast_ref::<&str>(),
-                ) {
-                    assert_eq!(
-                        data, expected_data,
-                        concat!("Expected right when calling `function_mvr`.")
-                    )
-                } else if let (Some(data), Some(expected_data)) = (
-                    data.downcast_ref::<String>(),
-                    expected_data.downcast_ref::<String>(),
-                ) {
-                    assert_eq!(
-                        data, expected_data,
-                        concat!("Expected right when calling `function_mvr`.")
-                    )
-                } else {
-                    assert!(false, "Unexpected error, cannot compare it.")
-                }
-            }
-            (result, expected_value) => assert!(
-                false,
-                format!(
-                    "Unexpected assertion for `function_mvr`: left = `{:?}`, right = `{:?}`.",
-                    result,
-                    expected_value
-                )
-            ),
-        }
-    });
+trait ExpectedExpr {
+    fn expected_value(n: i32) -> Self;
 }
+impl ExpectedExpr for i32 {
+    fn expected_value(n: i32) -> i32 {
+        n + 1
+    }
+}
+impl ExpectedExpr for i64 {
+    fn expected_value(n: i32) -> i64 {
+        n as i64 + 2i64
+    }
+}
+impl ExpectedExpr for f32 {
+    fn expected_value(n: i32) -> f32 {
+        n as f32 * 0.1
+    }
+}
+impl ExpectedExpr for f64 {
+    fn expected_value(n: i32) -> f64 {
+        n as f64 * 0.12
+    }
+}
+
+macro_rules! mvr_test {
+    ($test_name:ident, $( $return_type:ty ),* ) => {
+        #[test]
+        fn $test_name() {
+            let wat: String = r#"
+(module
+  (type $type (func (param i32) (result
+"#.to_string() +
+            &stringify!( $( $return_type ),* ).replace(",", "").replace("(", "").replace(")", "") + &r#")))
+  (import "env" "callback_fn" (func $callback_fn (type $type)))
+  (func (export "test_call") (type $type)
+    get_local 0
+    call $callback_fn)
+
+  (func (export "test_call_indirect") (type $type)
+    (i32.const 1)
+    (call_indirect (type $type) (i32.const 0))
+  )
+
+  (table funcref
+    (elem
+      $callback_fn
+    )
+  )
+)
+"#.to_string();
+            let mut features = wabt::Features::new();
+            features.enable_multi_value();
+            let wasm_binary =
+                wat2wasm_with_features(wat.as_bytes(), features).expect("WAST not valid or malformed");
+            let module = compile_with_config(
+                &wasm_binary,
+                &get_compiler(),
+                CompilerConfig {
+                    features: Features {
+                        multi_value: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+                .unwrap();
+            fn callback_fn(n: i32) -> Result<( $( $return_type ),* ), ()> {
+                Ok( ( $( <$return_type>::expected_value(n) ),* ) )
+            }
+            let import_object = imports! {
+                "env" => {
+                    "callback_fn" => Func::new(callback_fn),
+                },
+            };
+            let instance = module.instantiate(&import_object).unwrap();
+
+            call_and_assert!(instance, test_call, ( $( $return_type ),* ), Ok( ( $( <$return_type>::expected_value(1) ),* ) ) );
+            call_and_assert!(instance, test_call_indirect, ( $( $return_type ),* ), Ok( ( $( <$return_type>::expected_value(1) ),* ) ) );
+        }
+    }
+}
+
+mvr_test!(test_mvr_i32_i32, i32, i32);
+mvr_test!(test_mvr_i32_f32, i32, f32);
+mvr_test!(test_mvr_f32_i32, f32, i32);
+mvr_test!(test_mvr_f32_f32, f32, f32);
+
+mvr_test!(test_mvr_i64_i32, i64, i32);
+mvr_test!(test_mvr_i64_f32, i64, f32);
+mvr_test!(test_mvr_f64_i32, f64, i32);
+mvr_test!(test_mvr_f64_f32, f64, f32);
+
+mvr_test!(test_mvr_i32_i64, i32, i64);
+mvr_test!(test_mvr_f32_i64, f32, i64);
+mvr_test!(test_mvr_i32_f64, i32, f64);
+mvr_test!(test_mvr_f32_f64, f32, f64);
+
+mvr_test!(test_mvr_i32_i32_i32, i32, i32, i32);
+mvr_test!(test_mvr_i32_i32_f32, i32, i32, f32);
+mvr_test!(test_mvr_i32_f32_i32, i32, f32, i32);
+mvr_test!(test_mvr_i32_f32_f32, i32, f32, f32);
+mvr_test!(test_mvr_f32_i32_i32, f32, i32, i32);
+mvr_test!(test_mvr_f32_i32_f32, f32, i32, f32);
+mvr_test!(test_mvr_f32_f32_i32, f32, f32, i32);
+mvr_test!(test_mvr_f32_f32_f32, f32, f32, f32);
+
+mvr_test!(test_mvr_i32_i32_i64, i32, i32, i64);
+mvr_test!(test_mvr_i32_f32_i64, i32, f32, i64);
+mvr_test!(test_mvr_f32_i32_i64, f32, i32, i64);
+mvr_test!(test_mvr_f32_f32_i64, f32, f32, i64);
+mvr_test!(test_mvr_i32_i32_f64, i32, i32, f64);
+mvr_test!(test_mvr_i32_f32_f64, i32, f32, f64);
+mvr_test!(test_mvr_f32_i32_f64, f32, i32, f64);
+mvr_test!(test_mvr_f32_f32_f64, f32, f32, f64);
+
+mvr_test!(test_mvr_i32_i64_i32, i32, i64, i32);
+mvr_test!(test_mvr_i32_i64_f32, i32, i64, f32);
+mvr_test!(test_mvr_f32_i64_i32, f32, i64, i32);
+mvr_test!(test_mvr_f32_i64_f32, f32, i64, f32);
+mvr_test!(test_mvr_i32_f64_i32, i32, f64, i32);
+mvr_test!(test_mvr_i32_f64_f32, i32, f64, f32);
+mvr_test!(test_mvr_f32_f64_i32, f32, f64, i32);
+mvr_test!(test_mvr_f32_f64_f32, f32, f64, f32);
+
+mvr_test!(test_mvr_i64_i32_i32, i64, i32, i32);
+mvr_test!(test_mvr_i64_i32_f32, i64, i32, f32);
+mvr_test!(test_mvr_i64_f32_i32, i64, f32, i32);
+mvr_test!(test_mvr_i64_f32_f32, i64, f32, f32);
+mvr_test!(test_mvr_f64_i32_i32, f64, i32, i32);
+mvr_test!(test_mvr_f64_i32_f32, f64, i32, f32);
+mvr_test!(test_mvr_f64_f32_i32, f64, f32, i32);
+mvr_test!(test_mvr_f64_f32_f32, f64, f32, f32);
+
+mvr_test!(test_mvr_i32_i32_i32_i32, i32, i32, i32, i32);
+mvr_test!(test_mvr_i32_i32_i32_f32, i32, i32, i32, f32);
+mvr_test!(test_mvr_i32_i32_f32_i32, i32, i32, f32, i32);
+mvr_test!(test_mvr_i32_i32_f32_f32, i32, i32, f32, f32);
+mvr_test!(test_mvr_i32_f32_i32_i32, i32, f32, i32, i32);
+mvr_test!(test_mvr_i32_f32_i32_f32, i32, f32, i32, f32);
+mvr_test!(test_mvr_i32_f32_f32_i32, i32, f32, f32, i32);
+mvr_test!(test_mvr_i32_f32_f32_f32, i32, f32, f32, f32);
+mvr_test!(test_mvr_f32_i32_i32_i32, f32, i32, i32, i32);
+mvr_test!(test_mvr_f32_i32_i32_f32, f32, i32, i32, f32);
+mvr_test!(test_mvr_f32_i32_f32_i32, f32, i32, f32, i32);
+mvr_test!(test_mvr_f32_i32_f32_f32, f32, i32, f32, f32);
+mvr_test!(test_mvr_f32_f32_i32_i32, f32, f32, i32, i32);
+mvr_test!(test_mvr_f32_f32_i32_f32, f32, f32, i32, f32);
+mvr_test!(test_mvr_f32_f32_f32_i32, f32, f32, f32, i32);
+mvr_test!(test_mvr_f32_f32_f32_f32, f32, f32, f32, f32);
+
+mvr_test!(test_mvr_i32_i32_i32_i32_i32, i32, i32, i32, i32, i32);

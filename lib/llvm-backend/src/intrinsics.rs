@@ -30,6 +30,8 @@ use wasmer_runtime_core::{
     vm::{Ctx, INTERNALS_SIZE},
 };
 
+use crate::abi;
+
 fn type_to_llvm_ptr<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> PointerType<'ctx> {
     match ty {
         Type::I32 => intrinsics.i32_ptr_ty,
@@ -626,23 +628,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         cache_builder: Builder<'ctx>,
     ) -> CtxType<'a, 'ctx> {
         CtxType {
-            ctx_ptr_value: func_value
-                .get_nth_param(
-                    if func_value
-                        .get_enum_attribute(
-                            AttributeLoc::Param(0),
-                            Attribute::get_named_enum_kind_id("sret"),
-                        )
-                        .is_some()
-                    {
-                        1
-                    } else {
-                        0
-                    },
-                )
-                .unwrap()
-                .into_pointer_value(),
-
+            ctx_ptr_value: abi::get_vmctx_ptr_param(func_value),
             info,
             cache_builder,
 
