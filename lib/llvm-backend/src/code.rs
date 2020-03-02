@@ -12,7 +12,7 @@ use inkwell::{
     context::Context,
     module::{Linkage, Module},
     passes::PassManager,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine},
+    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
     types::{
         BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
     },
@@ -8695,7 +8695,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
             )
             .unwrap();
 
-        module.set_target(&target);
+        module.set_target(&TargetTriple::create(TargetMachine::get_default_triple().to_string().as_str()));
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
         let builder = context.create_builder();
