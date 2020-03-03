@@ -1864,102 +1864,18 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
             }
             Operator::Call { function_index } => {
                 let func_index = FuncIndex::new(function_index as usize);
-                let sigindex = info.func_assoc[func_index];
-                let (llvm_sig, llvm_attrs) = &signatures[sigindex];
-                let func_sig = &info.signatures[sigindex];
-                let sret = if llvm_sig.get_return_type().is_none() && func_sig.returns().len() > 1 {
-                    Some(
-                        self.alloca_builder.as_ref().unwrap().build_alloca(
-                            llvm_sig.get_param_types()[0]
-                                .into_pointer_type()
-                                .get_element_type()
-                                .into_struct_type(),
-                            "sret",
-                        ),
-                    )
-                } else {
-                    None
-                };
+                let sig_index = info.func_assoc[func_index];
+                let (llvm_sig, llvm_attrs) = &signatures[sig_index];
+                let func_sig = &info.signatures[sig_index];
 
-                let (params, func_ptr) = match func_index.local_or_import(info) {
+                let (func_ptr, ctx_ptr) = match func_index.local_or_import(info) {
                     LocalOrImport::Local(_) => {
-                        let params = std::iter::once(ctx.basic()).chain(
-                            state
-                                .peekn_extra(func_sig.params().len())?
-                                .iter()
-                                .enumerate()
-                                .map(|(i, (v, info))| match func_sig.params()[i] {
-                                    Type::F32 => builder.build_bitcast(
-                                        apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        intrinsics.f32_ty,
-                                        &state.var_name(),
-                                    ),
-                                    Type::F64 => builder.build_bitcast(
-                                        apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        intrinsics.f64_ty,
-                                        &state.var_name(),
-                                    ),
-                                    Type::V128 => apply_pending_canonicalization(
-                                        builder, intrinsics, *v, *info,
-                                    ),
-                                    _ => *v,
-                                }),
-                        );
-
-                        let params: Vec<_> = if sret.is_some() {
-                            std::iter::once(sret.unwrap().as_basic_value_enum())
-                                .chain(params)
-                                .collect()
-                        } else {
-                            params.collect()
-                        };
-
                         let func_ptr = self.llvm_functions.borrow_mut()[&func_index];
-
-                        (params, func_ptr.as_global_value().as_pointer_value())
+                        (func_ptr.as_global_value().as_pointer_value(), ctx.ptr())
                     }
                     LocalOrImport::Import(import_func_index) => {
                         let (func_ptr_untyped, ctx_ptr) =
                             ctx.imported_func(import_func_index, intrinsics, self.module.clone());
-
-                        let params = std::iter::once(ctx_ptr.as_basic_value_enum()).chain(
-                            state
-                                .peekn_extra(func_sig.params().len())?
-                                .iter()
-                                .enumerate()
-                                .map(|(i, (v, info))| match func_sig.params()[i] {
-                                    Type::F32 => builder.build_bitcast(
-                                        apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        intrinsics.f32_ty,
-                                        &state.var_name(),
-                                    ),
-                                    Type::F64 => builder.build_bitcast(
-                                        apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        intrinsics.f64_ty,
-                                        &state.var_name(),
-                                    ),
-                                    Type::V128 => apply_pending_canonicalization(
-                                        builder, intrinsics, *v, *info,
-                                    ),
-                                    _ => *v,
-                                }),
-                        );
-
-                        let params: Vec<_> = if sret.is_some() {
-                            std::iter::once(sret.unwrap().as_basic_value_enum())
-                                .chain(params)
-                                .collect()
-                        } else {
-                            params.collect()
-                        };
 
                         let func_ptr_ty = llvm_sig.ptr_type(AddressSpace::Generic);
                         let func_ptr = builder.build_pointer_cast(
@@ -1968,11 +1884,42 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                             "typed_func_ptr",
                         );
 
-                        (params, func_ptr)
+                        (func_ptr, ctx_ptr)
                     }
                 };
 
-                state.popn(func_sig.params().len())?;
+                let params = state.popn_save_extra(func_sig.params().len())?;
+
+                // Apply pending canonicalizations.
+                let params =
+                    params
+                        .iter()
+                        .zip(func_sig.params().iter())
+                        .map(|((v, info), wasm_ty)| match wasm_ty {
+                            Type::F32 => builder.build_bitcast(
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                intrinsics.f32_ty,
+                                &state.var_name(),
+                            ),
+                            Type::F64 => builder.build_bitcast(
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                intrinsics.f64_ty,
+                                &state.var_name(),
+                            ),
+                            Type::V128 => {
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info)
+                            }
+                            _ => *v,
+                        });
+
+                let params = abi::args_to_call(
+                    self.alloca_builder.as_ref().unwrap(),
+                    func_sig,
+                    ctx_ptr,
+                    llvm_sig,
+                    params.collect::<Vec<_>>().as_slice(),
+                );
+
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -1990,6 +1937,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
+
                 let call_site = builder.build_call(func_ptr, &params, &state.var_name());
                 for (attr, attr_loc) in llvm_attrs {
                     call_site.add_attribute(*attr_loc, *attr);
@@ -2151,46 +2099,36 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 let wasmer_fn_sig = &info.signatures[sig_index];
                 let (fn_ty, fn_attrs) = &signatures[sig_index];
 
-                let pushed_args = state.popn_save_extra(wasmer_fn_sig.params().len())?;
+                let params = state.popn_save_extra(wasmer_fn_sig.params().len())?;
+                // Apply pending canonicalizations.
+                let params =
+                    params
+                        .iter()
+                        .zip(wasmer_fn_sig.params().iter())
+                        .map(|((v, info), wasm_ty)| match wasm_ty {
+                            Type::F32 => builder.build_bitcast(
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                intrinsics.f32_ty,
+                                &state.var_name(),
+                            ),
+                            Type::F64 => builder.build_bitcast(
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                intrinsics.f64_ty,
+                                &state.var_name(),
+                            ),
+                            Type::V128 => {
+                                apply_pending_canonicalization(builder, intrinsics, *v, *info)
+                            }
+                            _ => *v,
+                        });
 
-                let args = std::iter::once(ctx_ptr).chain(pushed_args.into_iter().enumerate().map(
-                    |(i, (v, info))| match wasmer_fn_sig.params()[i] {
-                        Type::F32 => builder.build_bitcast(
-                            apply_pending_canonicalization(builder, intrinsics, v, info),
-                            intrinsics.f32_ty,
-                            &state.var_name(),
-                        ),
-                        Type::F64 => builder.build_bitcast(
-                            apply_pending_canonicalization(builder, intrinsics, v, info),
-                            intrinsics.f64_ty,
-                            &state.var_name(),
-                        ),
-                        Type::V128 => apply_pending_canonicalization(builder, intrinsics, v, info),
-                        _ => v,
-                    },
-                ));
-
-                let sret = if fn_ty.get_return_type().is_none() && wasmer_fn_sig.returns().len() > 1
-                {
-                    Some(
-                        self.alloca_builder.as_ref().unwrap().build_alloca(
-                            fn_ty.get_param_types()[0]
-                                .into_pointer_type()
-                                .get_element_type()
-                                .into_struct_type(),
-                            "sret",
-                        ),
-                    )
-                } else {
-                    None
-                };
-                let args: Vec<_> = if sret.is_some() {
-                    std::iter::once(sret.unwrap().as_basic_value_enum())
-                        .chain(args)
-                        .collect()
-                } else {
-                    args.collect()
-                };
+                let params = abi::args_to_call(
+                    self.alloca_builder.as_ref().unwrap(),
+                    wasmer_fn_sig,
+                    ctx_ptr.into_pointer_value(),
+                    fn_ty,
+                    params.collect::<Vec<_>>().as_slice(),
+                );
 
                 let typed_func_ptr = builder.build_pointer_cast(
                     func_ptr,
@@ -2215,9 +2153,8 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         )
                     }
                 }
-                dbg!(&typed_func_ptr);
-                dbg!(&args);
-                let call_site = builder.build_call(typed_func_ptr, &args, "indirect_call");
+
+                let call_site = builder.build_call(typed_func_ptr, &params, "indirect_call");
                 for (attr, attr_loc) in fn_attrs {
                     call_site.add_attribute(*attr_loc, *attr);
                 }

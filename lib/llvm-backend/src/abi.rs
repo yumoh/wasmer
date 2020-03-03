@@ -5,6 +5,11 @@
 //
 // So far, this is an implementation of the SysV AMD64 ABI.
 
+#![deny(
+    dead_code,
+    missing_docs,
+)]
+
 use crate::{intrinsics::Intrinsics, trampolines::type_to_llvm};
 use inkwell::{
     attributes::{Attribute, AttributeLoc},
@@ -12,8 +17,8 @@ use inkwell::{
     context::Context,
     types::{BasicType, FunctionType},
     values::{
-        BasicValueEnum, CallSiteValue, FloatValue, FunctionValue, IntValue, PointerValue,
-        VectorValue,
+        BasicValue, BasicValueEnum, CallSiteValue, FloatValue, FunctionValue, IntValue,
+        PointerValue, VectorValue,
     },
     AddressSpace,
 };
@@ -196,7 +201,41 @@ pub fn func_sig_to_llvm<'ctx>(
     }
 }
 
-// TODO: pack wasm stack values into function parameters
+// Marshall wasm stack values into function parameters.
+pub fn args_to_call<'ctx>(
+    alloca_builder: &Builder<'ctx>,
+    func_sig: &FuncSig,
+    ctx_ptr: PointerValue<'ctx>,
+    llvm_fn_ty: &FunctionType<'ctx>,
+    values: &[BasicValueEnum<'ctx>],
+) -> Vec<BasicValueEnum<'ctx>> {
+    // If it's an sret, allocate the return space.
+    let sret = if llvm_fn_ty.get_return_type().is_none() && func_sig.returns().len() > 1 {
+        Some(
+            alloca_builder.build_alloca(
+                llvm_fn_ty.get_param_types()[0]
+                    .into_pointer_type()
+                    .get_element_type()
+                    .into_struct_type(),
+                "sret",
+            ),
+        )
+    } else {
+        None
+    };
+
+    let values = std::iter::once(ctx_ptr.as_basic_value_enum()).chain(values.iter().map(|x| *x));
+
+    let values = if sret.is_some() {
+        std::iter::once(sret.unwrap().as_basic_value_enum())
+            .chain(values)
+            .collect()
+    } else {
+        values.collect()
+    };
+
+    values
+}
 
 // Given a CallSite, extract the returned values and return them in a Vec.
 pub fn rets_from_call<'ctx>(

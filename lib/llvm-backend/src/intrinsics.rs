@@ -642,6 +642,10 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         }
     }
 
+    pub fn ptr(&self) -> PointerValue<'ctx> {
+        self.ctx_ptr_value
+    }
+
     pub fn basic(&self) -> BasicValueEnum<'ctx> {
         self.ctx_ptr_value.as_basic_value_enum()
     }
