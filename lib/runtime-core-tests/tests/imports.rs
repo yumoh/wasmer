@@ -274,19 +274,16 @@ macro_rules! test {
     };
 }
 
-<<<<<<< HEAD
-test!(test_fn, function_fn, Ok(2));
-test!(test_closure, function_closure, Ok(2));
-test!(test_closure_dynamic, function_closure_dynamic, Ok(2));
+
+test!(test_fn, function_fn, i32, Ok(2));
+test!(test_closure, function_closure, i32, Ok(2));
+test!(test_closure_dynamic, function_closure_dynamic, i32, Ok(2));
 test!(
     test_closure_with_env,
     function_closure_with_env,
+    i32,
     Ok(2 + shift + SHIFT)
 );
-test!(test_fn_with_vmctx, function_fn_with_vmctx, Ok(2 + SHIFT));
-=======
-test!(test_fn, function_fn, i32, Ok(2));
->>>>>>> f9d839212... Initial commit of refactored ABI support in LLVM backend. Also MVR tests.
 test!(
     test_fn_with_vmctx,
     function_fn_with_vmctx,

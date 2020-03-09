@@ -1267,7 +1267,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 // For each result of the block we're branching to,
                 // pop a value off the value stack and load it into
                 // the corresponding phi.
-                for (phi, value) in frame.phis().iter().zip(values) {
+                for (phi, value) in phis.iter().zip(values) {
                     phi.add_incoming(&[(&value, current_block)]);
                 }
 
