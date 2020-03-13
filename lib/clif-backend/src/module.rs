@@ -11,7 +11,7 @@ use wasmer_runtime_core::cache::{Artifact, Error as CacheError};
 use wasmer_runtime_core::{
     module::{ModuleInfo, ModuleInner},
     structures::TypedIndex,
-    types::{FuncIndex, FuncSig, GlobalIndex, MemoryIndex, SigIndex, TableIndex, Type},
+    types::{FuncIndex, /*FuncSig,*/ GlobalIndex, MemoryIndex, SigIndex, TableIndex, Type},
 };
 
 /// This contains all of the items in a `ModuleInner` except the `func_resolver`.
@@ -79,25 +79,6 @@ convert_clif_to_runtime_index![
     (GlobalIndex: GlobalIndex),
     (SignatureIndex: SigIndex),
 ];
-
-impl From<Converter<ir::Signature>> for FuncSig {
-    fn from(signature: Converter<ir::Signature>) -> Self {
-        FuncSig::new(
-            signature
-                .0
-                .params
-                .iter()
-                .map(|param| Converter(param.value_type).into())
-                .collect::<Vec<_>>(),
-            signature
-                .0
-                .returns
-                .iter()
-                .map(|ret| Converter(ret.value_type).into())
-                .collect::<Vec<_>>(),
-        )
-    }
-}
 
 impl From<Converter<ir::Type>> for Type {
     fn from(ty: Converter<ir::Type>) -> Self {

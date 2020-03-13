@@ -21,6 +21,6 @@ pub fn blocktype_to_param_types(ty: WpTypeOrFuncType, info: &ModuleInfo) -> Vec<
         WpTypeOrFuncType::FuncType(sig_index) => {
             let ty = &info.signatures[SigIndex::new(sig_index as usize)];
             ty.params().to_vec()
-         }
-     }
- }
+        }
+    }
+}

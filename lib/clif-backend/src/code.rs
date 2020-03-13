@@ -2,7 +2,7 @@
 // and subject to the license https://github.com/CraneStation/cranelift/blob/c47ca7bafc8fc48358f1baa72360e61fc1f7a0f2/cranelift-wasm/LICENSE
 
 use crate::{
-    cache::CacheGenerator, get_isa, module, module::Converter, relocation::call_names,
+    abi, cache::CacheGenerator, get_isa, module, module::Converter, relocation::call_names,
     resolver::FuncResolverBuilder, signal::Caller, trampoline::Trampolines,
 };
 
@@ -95,6 +95,10 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
         let func_index = LocalFuncIndex::new(self.functions.len());
         let name = ir::ExternalName::user(0, func_index.index() as u32);
 
+        let func_sig =
+            &module_info.read().unwrap().signatures[module_info.read().unwrap().func_assoc
+                [func_index.convert_up(&module_info.read().unwrap())]];
+
         let sig = generate_signature(
             self,
             self.get_func_type(
@@ -119,6 +123,7 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
             },
             loc,
             module_state,
+            returns: vec![],
         };
 
         let generate_debug_info = module_info.read().unwrap().generate_debug_info;
@@ -150,11 +155,16 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
         // Set up the translation state with a single pushed control block representing the whole
         // function and its return values.
         let exit_block = builder.create_block();
-        builder.append_block_params_for_function_returns(exit_block);
+        for ty in func_sig.returns() {
+            builder
+                .func
+                .dfg
+                .append_block_param(exit_block, Converter(*ty).into());
+        }
         func_env
             .func_translator
             .state
-            .initialize(&builder.func.signature, exit_block);
+            .initialize(exit_block, func_sig.returns().len());
 
         self.functions.push(func_env);
         Ok(self.functions.last_mut().unwrap())
@@ -234,17 +244,36 @@ impl ModuleCodeGenerator<CraneliftFunctionCodeGenerator, Caller, CodegenError>
 }
 
 fn convert_func_sig(sig: &FuncSig, call_conv: CallConv) -> ir::Signature {
+    let mut returns = sig
+        .returns()
+        .iter()
+        .map(|returns| Converter(*returns).into())
+        .collect::<Vec<_>>();
+    if returns.len() > 1 {
+        let rt = sig
+            .returns()
+            .iter()
+            .fold(abi::ReturnType::None, abi::ReturnType::fold);
+        if !rt.is_sret() {
+            returns = rt
+                .rets()
+                .iter()
+                .map(|returns| ir::AbiParam {
+                    value_type: *returns,
+                    purpose: ir::ArgumentPurpose::Normal,
+                    extension: ir::ArgumentExtension::None,
+                    location: ir::ArgumentLoc::Unassigned,
+                })
+                .collect::<Vec<_>>();
+        }
+    }
     ir::Signature {
         params: sig
             .params()
             .iter()
             .map(|params| Converter(*params).into())
             .collect::<Vec<_>>(),
-        returns: sig
-            .returns()
-            .iter()
-            .map(|returns| Converter(*returns).into())
-            .collect::<Vec<_>>(),
+        returns,
         call_conv,
     }
 }
@@ -274,6 +303,7 @@ pub struct CraneliftFunctionCodeGenerator {
     /// Where the function lives in the Wasm module as a span of bytes
     loc: WasmSpan,
     module_state: ModuleTranslationState,
+    returns: Vec<WpType>,
 }
 
 pub struct FunctionEnvironment {
@@ -652,7 +682,10 @@ impl FuncEnvironment for FunctionEnvironment {
         sig_ref: ir::SigRef,
         callee: ir::Value,
         call_args: &[ir::Value],
-    ) -> cranelift_wasm::WasmResult<ir::Inst> {
+    ) -> cranelift_wasm::WasmResult<Vec<ir::Value>> {
+        let func_sig =
+            &self.module_info.read().unwrap().signatures[SigIndex::new(clif_sig_index.index())];
+
         // Get the pointer type based on machine's pointer size.
         let ptr_type = self.pointer_type();
 
@@ -704,6 +737,7 @@ impl FuncEnvironment for FunctionEnvironment {
                 ),
                 offset: 0.into(),
                 colocated: false,
+                tls: false,
             });
 
             let val = pos.ins().symbol_value(ir::types::I64, sig_index_global);
@@ -734,7 +768,8 @@ impl FuncEnvironment for FunctionEnvironment {
         args.push(vmctx_ptr);
         args.extend(call_args.iter().cloned());
 
-        Ok(pos.ins().call_indirect(sig_ref, func_ptr, &args))
+        let call = pos.ins().call_indirect(sig_ref, func_ptr, &args);
+        Ok(abi::rets_from_call(&mut pos, call, &func_sig))
     }
 
     /// Generates a call IR with `callee` and `call_args` and inserts it at `pos`
@@ -747,8 +782,10 @@ impl FuncEnvironment for FunctionEnvironment {
         clif_callee_index: cranelift_wasm::FuncIndex,
         callee: ir::FuncRef,
         call_args: &[ir::Value],
-    ) -> cranelift_wasm::WasmResult<ir::Inst> {
+    ) -> cranelift_wasm::WasmResult<Vec<ir::Value>> {
         let callee_index: FuncIndex = Converter(clif_callee_index).into();
+        let sig_index: SigIndex = self.module_info.read().unwrap().func_assoc[callee_index];
+        let func_sig = &self.module_info.read().unwrap().signatures[sig_index];
         let ptr_type = self.pointer_type();
 
         match callee_index.local_or_import(&self.module_info.read().unwrap()) {
@@ -782,7 +819,9 @@ impl FuncEnvironment for FunctionEnvironment {
                     )
                 };
 
-                Ok(pos.ins().call_indirect(sig_ref, function_ptr, &args))
+                let call = pos.ins().call_indirect(sig_ref, function_ptr, &args);
+                let call_results = abi::rets_from_call(&mut pos, call, func_sig);
+                Ok(call_results)
             }
             LocalOrImport::Import(imported_func_index) => {
                 // this is an imported function
@@ -839,9 +878,10 @@ impl FuncEnvironment for FunctionEnvironment {
                 args.push(imported_func_ctx_vmctx_addr);
                 args.extend(call_args.iter().cloned());
 
-                Ok(pos
+                let call = pos
                     .ins()
-                    .call_indirect(sig_ref, imported_func_addr, &args[..]))
+                    .call_indirect(sig_ref, imported_func_addr, &args[..]);
+                Ok(abi::rets_from_call(&mut pos, call, func_sig))
             }
         }
     }
@@ -1158,7 +1198,8 @@ impl FunctionEnvironment {
 }
 
 impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
-    fn feed_return(&mut self, _ty: WpType) -> Result<(), CodegenError> {
+    fn feed_return(&mut self, ty: WpType) -> Result<(), CodegenError> {
+        self.returns.push(ty);
         Ok(())
     }
 
@@ -1249,6 +1290,104 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
         if state.reachable() {
             debug_assert!(builder.is_pristine());
             if !builder.is_unreachable() {
+                let concat_i32 = |builder: &mut FunctionBuilder, v0, v1| {
+                    let v2 = builder.ins().uextend(ir::types::I64, v0);
+                    let v3 = builder.ins().uextend(ir::types::I64, v1);
+                    let v4 = builder.ins().ishl_imm(v3, 32);
+                    let v5 = builder.ins().bor(v2, v4);
+                    v5
+                };
+
+                let concat_f32 = |builder: &mut FunctionBuilder, v0, v1| {
+                    let v2 = builder.ins().bitcast(ir::types::I32, v0);
+                    let v3 = builder.ins().bitcast(ir::types::I32, v1);
+                    let v4 = concat_i32(builder, v2, v3);
+                    let v5 = builder.ins().bitcast(ir::types::F64, v4);
+                    v5
+                };
+
+                assert!(self.returns.len() == state.stack.len());
+                pub fn is_32(ty: &WpType) -> bool {
+                    match ty {
+                        WpType::I32 | WpType::F32 => true,
+                        _ => false,
+                    }
+                }
+                pub fn is_64(ty: &WpType) -> bool {
+                    match ty {
+                        WpType::I64 | WpType::F64 => true,
+                        _ => false,
+                    }
+                }
+                match self.returns.as_slice() {
+                    [WpType::F32, WpType::F32] => {
+                        let r0 = concat_f32(&mut builder, state.stack[0], state.stack[1]);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                    }
+                    [a, b] if is_32(a) && is_32(b) => {
+                        let s0 = builder.ins().bitcast(ir::types::I32, state.stack[0]);
+                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
+                        let r0 = concat_i32(&mut builder, s0, s1);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                    }
+                    [WpType::F32, WpType::F32, c] if (is_32(c) || is_64(c)) => {
+                        let r0 = concat_f32(&mut builder, state.stack[0], state.stack[1]);
+                        let r1 = state.stack.pop().unwrap();
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    [a, b, c] if is_32(a) && is_32(b) && (is_32(c) || is_64(c)) => {
+                        let s0 = builder.ins().bitcast(ir::types::I32, state.stack[0]);
+                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
+                        let r0 = concat_i32(&mut builder, s0, s1);
+                        let r1 = state.stack.pop().unwrap();
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    [a, b, c] if is_64(a) && is_32(b) && is_32(c) => {
+                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
+                        let s2 = builder.ins().bitcast(ir::types::I32, state.stack[2]);
+                        state.stack.pop();
+                        state.stack.pop();
+                        state.stack.push(concat_i32(&mut builder, s1, s2));
+                    }
+                    [WpType::F32, WpType::F32, WpType::F32, WpType::F32] => {
+                        let r0 = concat_f32(&mut builder, state.stack[0], state.stack[1]);
+                        let r1 = concat_f32(&mut builder, state.stack[2], state.stack[3]);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    [WpType::F32, WpType::F32, c, d] if is_32(c) && is_32(d) => {
+                        let s2 = builder.ins().bitcast(ir::types::I32, state.stack[2]);
+                        let s3 = builder.ins().bitcast(ir::types::I32, state.stack[3]);
+                        let r0 = concat_f32(&mut builder, state.stack[0], state.stack[1]);
+                        let r1 = concat_i32(&mut builder, s2, s3);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    [a, b, WpType::F32, WpType::F32] if is_32(a) && is_32(b) => {
+                        let r0 = concat_i32(&mut builder, state.stack[0], state.stack[1]);
+                        let r1 = concat_f32(&mut builder, state.stack[2], state.stack[3]);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    [a, b, c, d] if is_32(a) && is_32(b) && is_32(c) && is_32(d) => {
+                        let r0 = concat_i32(&mut builder, state.stack[0], state.stack[1]);
+                        let r1 = concat_i32(&mut builder, state.stack[2], state.stack[3]);
+                        state.stack.clear();
+                        state.stack.push(r0);
+                        state.stack.push(r1);
+                    }
+                    _ => {}
+                }
+
                 match return_mode {
                     ReturnMode::NormalReturns => builder.ins().return_(&state.stack),
                     ReturnMode::FallthroughReturn => builder.ins().fallthrough_return(&state.stack),
@@ -1263,6 +1402,7 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
         state.stack.clear();
 
         self.builder().finalize();
+        dbg!(&self.func);
         Ok(())
     }
 }

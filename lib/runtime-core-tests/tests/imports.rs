@@ -274,7 +274,6 @@ macro_rules! test {
     };
 }
 
-
 test!(test_fn, function_fn, i32, Ok(2));
 test!(test_closure, function_closure, i32, Ok(2));
 test!(test_closure_dynamic, function_closure_dynamic, i32, Ok(2));
@@ -363,7 +362,6 @@ macro_rules! mvr_test {
     (i32.const 1)
     (call_indirect (type $type) (i32.const 0))
   )
-
   (table funcref
     (elem
       $callback_fn

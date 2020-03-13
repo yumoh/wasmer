@@ -1,4 +1,4 @@
-use crate::{cache::TrampolineCache, resolver::NoopStackmapSink};
+use crate::{abi, cache::TrampolineCache, resolver::NoopStackmapSink};
 use cranelift_codegen::{
     binemit::{NullTrapSink, Reloc, RelocSink},
     cursor::{Cursor, FuncCursor},
@@ -183,7 +183,7 @@ fn generate_func(func_sig: &FuncSig) -> ir::Function {
 
     let call_inst = pos.ins().call_indirect(export_sig_ref, func_ptr, &args_vec);
 
-    let return_values = pos.func.dfg.inst_results(call_inst).to_vec();
+    let return_values = abi::rets_from_call(&mut pos, call_inst, func_sig);
 
     for (index, return_val) in return_values.iter().enumerate() {
         let mem_flags = ir::MemFlags::trusted();
@@ -233,12 +233,19 @@ fn generate_export_signature(func_sig: &FuncSig) -> ir::Signature {
     let call_convention = isa.default_call_conv();
     let mut export_clif_sig = ir::Signature::new(call_convention);
 
-    let func_sig_iter = func_sig.params().iter().map(|wasm_ty| ir::AbiParam {
-        value_type: wasm_ty_to_clif(*wasm_ty),
+    let normal_abi_param_clif = |clif_ty: &ir::Type| ir::AbiParam {
+        value_type: *clif_ty,
         purpose: ir::ArgumentPurpose::Normal,
         extension: ir::ArgumentExtension::None,
         location: ir::ArgumentLoc::Unassigned,
-    });
+    };
+
+    let normal_abi_param = |wasm_ty| normal_abi_param_clif(&wasm_ty_to_clif(wasm_ty));
+
+    let func_sig_iter = func_sig
+        .params()
+        .iter()
+        .map(|wasm_ty| normal_abi_param(*wasm_ty));
 
     export_clif_sig.params = iter::once(ir::AbiParam {
         value_type: ir::types::I64,
@@ -249,16 +256,23 @@ fn generate_export_signature(func_sig: &FuncSig) -> ir::Signature {
     .chain(func_sig_iter)
     .collect();
 
-    export_clif_sig.returns = func_sig
-        .returns()
-        .iter()
-        .map(|wasm_ty| ir::AbiParam {
-            value_type: wasm_ty_to_clif(*wasm_ty),
-            purpose: ir::ArgumentPurpose::Normal,
-            extension: ir::ArgumentExtension::None,
-            location: ir::ArgumentLoc::Unassigned,
-        })
-        .collect();
+    if func_sig.returns().len() == 1 {
+        export_clif_sig.returns = vec![normal_abi_param(func_sig.returns()[0])];
+    } else {
+        let rt = func_sig
+            .returns()
+            .iter()
+            .fold(abi::ReturnType::None, abi::ReturnType::fold);
+        if rt.is_sret() {
+            export_clif_sig.returns = func_sig
+                .returns()
+                .iter()
+                .map(|wasm_ty| normal_abi_param(*wasm_ty))
+                .collect();
+        } else {
+            export_clif_sig.returns = rt.rets().iter().map(normal_abi_param_clif).collect();
+        }
+    }
 
     export_clif_sig
 }
