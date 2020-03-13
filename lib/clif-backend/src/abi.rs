@@ -150,11 +150,16 @@ pub fn rets_from_call(
 
     let split_f64 = |pos: &mut FuncCursor, v0| {
         let v1 = pos.ins().bitcast(ir::types::I64, v0);
-        let (v2, v3) = split_i64(pos, v1);
-        let v4 = pos.ins().bitcast(ir::types::F32, v2);
-        let v5 = pos.ins().bitcast(ir::types::F32, v3);
-        (v4, v5)
+        split_i64(pos, v1)
     };
+
+    fn cast_to_f32(pos: &mut FuncCursor, ty: &WasmType, value: ir::Value) -> ir::Value {
+        if *ty == WasmType::F32 {
+            pos.ins().bitcast(ir::types::F32, value)
+        } else {
+            value
+        }
+    }
 
     match func_sig.returns() {
         [] => return_values,
@@ -165,30 +170,19 @@ pub fn rets_from_call(
             } else {
                 split_i64(&mut pos, return_values[0])
             };
-            if *a == WasmType::F32 {
-                r0 = pos.ins().bitcast(ir::types::F32, r0);
-            }
-            if *b == WasmType::F32 {
-                r1 = pos.ins().bitcast(ir::types::F32, r1);
-            }
+            r0 = cast_to_f32(&mut pos, a, r0);
+            r1 = cast_to_f32(&mut pos, b, r1);
             vec![r0, r1]
         }
         [a, b, c] if is_64(*a) && is_32(*b) && is_32(*c) => {
-            let mut r0 = return_values[0];
+            let r0 = return_values[0];
             let (mut r1, mut r2) = if (*b, *c) == (WasmType::F32, WasmType::F32) {
                 split_f64(&mut pos, return_values[1])
             } else {
                 split_i64(&mut pos, return_values[1])
             };
-            if *a == WasmType::F32 {
-                r0 = pos.ins().bitcast(ir::types::F32, r0);
-            }
-            if *b == WasmType::F32 {
-                r1 = pos.ins().bitcast(ir::types::F32, r1);
-            }
-            if *c == WasmType::F32 {
-                r2 = pos.ins().bitcast(ir::types::F32, r2);
-            }
+            r1 = cast_to_f32(&mut pos, b, r1);
+            r2 = cast_to_f32(&mut pos, c, r2);
             vec![r0, r1, r2]
         }
         [a, b, c] if is_32(*a) && is_32(*b) && is_64(*c) => {
@@ -212,16 +206,9 @@ pub fn rets_from_call(
             } else {
                 split_i64(&mut pos, return_values[0])
             };
-            let mut r2 = return_values[1];
-            if *a == WasmType::F32 {
-                r0 = pos.ins().bitcast(ir::types::F32, r0);
-            }
-            if *b == WasmType::F32 {
-                r1 = pos.ins().bitcast(ir::types::F32, r1);
-            }
-            if *c == WasmType::F32 {
-                r2 = pos.ins().bitcast(ir::types::F32, r2);
-            }
+            let r2 = return_values[1];
+            r0 = cast_to_f32(&mut pos, a, r0);
+            r1 = cast_to_f32(&mut pos, b, r1);
             vec![r0, r1, r2]
         }
         [a, b, c, d] if is_32(*a) && is_32(*b) && is_32(*c) && is_32(*d) => {

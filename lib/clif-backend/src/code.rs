@@ -1307,16 +1307,27 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
                 };
 
                 assert!(self.returns.len() == state.stack.len());
-                pub fn is_32(ty: &WpType) -> bool {
+                fn is_32(ty: &WpType) -> bool {
                     match ty {
                         WpType::I32 | WpType::F32 => true,
                         _ => false,
                     }
                 }
-                pub fn is_64(ty: &WpType) -> bool {
+                fn is_64(ty: &WpType) -> bool {
                     match ty {
                         WpType::I64 | WpType::F64 => true,
                         _ => false,
+                    }
+                }
+                fn cast_to_i32(
+                    builder: &mut FunctionBuilder,
+                    ty: &WpType,
+                    value: ir::Value,
+                ) -> ir::Value {
+                    if *ty == WpType::F32 {
+                        builder.ins().bitcast(ir::types::I32, value)
+                    } else {
+                        value
                     }
                 }
                 match self.returns.as_slice() {
@@ -1326,8 +1337,8 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
                         state.stack.push(r0);
                     }
                     [a, b] if is_32(a) && is_32(b) => {
-                        let s0 = builder.ins().bitcast(ir::types::I32, state.stack[0]);
-                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
+                        let s0 = cast_to_i32(&mut builder, a, state.stack[0]);
+                        let s1 = cast_to_i32(&mut builder, b, state.stack[1]);
                         let r0 = concat_i32(&mut builder, s0, s1);
                         state.stack.clear();
                         state.stack.push(r0);
@@ -1340,17 +1351,24 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
                         state.stack.push(r1);
                     }
                     [a, b, c] if is_32(a) && is_32(b) && (is_32(c) || is_64(c)) => {
-                        let s0 = builder.ins().bitcast(ir::types::I32, state.stack[0]);
-                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
+                        let s0 = cast_to_i32(&mut builder, a, state.stack[0]);
+                        let s1 = cast_to_i32(&mut builder, b, state.stack[1]);
                         let r0 = concat_i32(&mut builder, s0, s1);
                         let r1 = state.stack.pop().unwrap();
                         state.stack.clear();
                         state.stack.push(r0);
                         state.stack.push(r1);
                     }
+                    [a, WpType::F32, WpType::F32] if is_64(a) => {
+                        let s1 = state.stack[1];
+                        let s2 = state.stack[2];
+                        state.stack.pop();
+                        state.stack.pop();
+                        state.stack.push(concat_f32(&mut builder, s1, s2));
+                    }
                     [a, b, c] if is_64(a) && is_32(b) && is_32(c) => {
-                        let s1 = builder.ins().bitcast(ir::types::I32, state.stack[1]);
-                        let s2 = builder.ins().bitcast(ir::types::I32, state.stack[2]);
+                        let s1 = cast_to_i32(&mut builder, b, state.stack[1]);
+                        let s2 = cast_to_i32(&mut builder, c, state.stack[2]);
                         state.stack.pop();
                         state.stack.pop();
                         state.stack.push(concat_i32(&mut builder, s1, s2));
@@ -1363,8 +1381,8 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
                         state.stack.push(r1);
                     }
                     [WpType::F32, WpType::F32, c, d] if is_32(c) && is_32(d) => {
-                        let s2 = builder.ins().bitcast(ir::types::I32, state.stack[2]);
-                        let s3 = builder.ins().bitcast(ir::types::I32, state.stack[3]);
+                        let s2 = cast_to_i32(&mut builder, c, state.stack[2]);
+                        let s3 = cast_to_i32(&mut builder, d, state.stack[3]);
                         let r0 = concat_f32(&mut builder, state.stack[0], state.stack[1]);
                         let r1 = concat_i32(&mut builder, s2, s3);
                         state.stack.clear();
@@ -1372,15 +1390,21 @@ impl FunctionCodeGenerator<CodegenError> for CraneliftFunctionCodeGenerator {
                         state.stack.push(r1);
                     }
                     [a, b, WpType::F32, WpType::F32] if is_32(a) && is_32(b) => {
-                        let r0 = concat_i32(&mut builder, state.stack[0], state.stack[1]);
+                        let s0 = cast_to_i32(&mut builder, a, state.stack[0]);
+                        let s1 = cast_to_i32(&mut builder, b, state.stack[1]);
+                        let r0 = concat_i32(&mut builder, s0, s1);
                         let r1 = concat_f32(&mut builder, state.stack[2], state.stack[3]);
                         state.stack.clear();
                         state.stack.push(r0);
                         state.stack.push(r1);
                     }
                     [a, b, c, d] if is_32(a) && is_32(b) && is_32(c) && is_32(d) => {
-                        let r0 = concat_i32(&mut builder, state.stack[0], state.stack[1]);
-                        let r1 = concat_i32(&mut builder, state.stack[2], state.stack[3]);
+                        let s0 = cast_to_i32(&mut builder, a, state.stack[0]);
+                        let s1 = cast_to_i32(&mut builder, b, state.stack[1]);
+                        let s2 = cast_to_i32(&mut builder, c, state.stack[2]);
+                        let s3 = cast_to_i32(&mut builder, d, state.stack[3]);
+                        let r0 = concat_i32(&mut builder, s0, s1);
+                        let r1 = concat_i32(&mut builder, s2, s3);
                         state.stack.clear();
                         state.stack.push(r0);
                         state.stack.push(r1);
