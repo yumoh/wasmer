@@ -41,6 +41,7 @@ wasmer-wasi-tests = { path = "lib/wasi-tests", optional = true }
 wasmer-middleware-common-tests = { path = "lib/middleware-common-tests", optional = true }
 wasmer-emscripten-tests = { path = "lib/emscripten-tests", optional = true }
 wasmer-wasi-experimental-io-devices = { path = "lib/wasi-experimental-io-devices", optional = true }
+wasm-common = { path = "lib/wasm-common", optional = true }
 
 [workspace]
 members = [

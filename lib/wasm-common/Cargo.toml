@@ -13,7 +13,7 @@ edition = "2018"
 [dependencies]
 # TODO: Syrus - Delete wasmparser dependency
 wasmparser = { version = "0.51.0", default-features = false }
-cranelift-entity = { path = "../../cranelift/entity", version = "0.59.0" }
+cranelift-entity = "0.59.0"
 serde = { version = "1.0.94", features = ["derive"], optional = true }
 thiserror = "1.0.4"
 

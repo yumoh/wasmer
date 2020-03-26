@@ -279,6 +279,9 @@ name = "cranelift-entity"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b88e792b28e1ebbc0187b72ba5ba880dad083abe9231a99d19604d10c9e73f38"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "cranelift-native"
@@ -1803,6 +1806,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cccddf32554fecc6acb585f82a32a72e28b48f8c4c1883ddfeeeaa96f7d8e519"
 
 [[package]]
+name = "wasm-common"
+version = "0.16.2"
+dependencies = [
+ "cranelift-entity 0.59.0",
+ "serde",
+ "thiserror",
+ "wasmparser 0.51.4",
+]
+
+[[package]]
 name = "wasm-debug"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1833,6 +1846,7 @@ dependencies = [
  "structopt",
  "typetag",
  "wabt",
+ "wasm-common",
  "wasmer-clif-backend",
  "wasmer-dev-utils",
  "wasmer-emscripten",
