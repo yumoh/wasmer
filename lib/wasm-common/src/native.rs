@@ -1,11 +1,8 @@
 //! This module permits to create native functions
 //! easily in Rust, thanks to it's advanced typing system.
 use crate::types::{Type, FuncType};
-use crate::values::Value;
 use std::convert::Infallible;
 use std::marker::PhantomData;
-use std::any::Any;
-use std::ptr;
 
 /// Represents a native Wasm type.
 /// 
@@ -180,10 +177,8 @@ pub struct FunctionBody(*mut u8);
 /// Represents a function that can be used by WebAssembly.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct Func<Args = (), Rets = (), Env=()> {
-    ty: FuncType,
     address: *const FunctionBody,
     env: Option<*mut Env>,
-    // pointer: *const FunctionBody,
     _phantom: PhantomData<(Args, Rets)>,
 }
 
@@ -198,15 +193,10 @@ where
     /// Creates a new `Func`.
     pub fn new<F>(func: F) -> Self
     where
-        F: HostFunction<Args, Rets, WithoutEnv, ()>,
+        F: HostFunction<Args, Rets, WithoutEnv, Env>,
     {
         Self {
-            ty: FuncType::new(
-                Args::wasm_types(),
-                Rets::wasm_types(),
-            ),
             env: None,
-            // inner: func as *const (),
             address: func.to_raw(),
             _phantom: PhantomData,
         }
@@ -218,10 +208,6 @@ where
         F: HostFunction<Args, Rets, WithEnv, Env>,
     {
         Self {
-            ty: FuncType::new(
-                Args::wasm_types(),
-                Rets::wasm_types(),
-            ),
             env: Some(env),
             address: func.to_raw(),
             _phantom: PhantomData,
@@ -229,10 +215,13 @@ where
     }
     
     /// Get the type of the Func
-    pub fn ty(&self) -> &FuncType {
-        &self.ty
+    pub fn ty(&self) -> FuncType {
+        FuncType::new(
+            Args::wasm_types(),
+            Rets::wasm_types(),
+        )
     }
-    
+
     /// Get the type of the Func
     pub fn env(&self) -> Option<*mut Env> {
         self.env
@@ -603,46 +592,46 @@ mod test_func {
         (b, a)
     }
 
-    // #[test]
-    // fn test_function_types() {
-    //     assert_eq!(Func::new(func).ty, FuncType::new(
-    //         vec![],
-    //         vec![]
-    //     ));
-    //     assert_eq!(Func::new(func__i32).ty, FuncType::new(
-    //         vec![],
-    //         vec![Type::I32]
-    //     ));
-    //     assert_eq!(Func::new(func_i32).ty, FuncType::new(
-    //         vec![Type::I32],
-    //         vec![]
-    //     ));
-    //     assert_eq!(Func::new(func_i32__i32).ty, FuncType::new(
-    //         vec![Type::I32],
-    //         vec![Type::I32]
-    //     ));
-    //     assert_eq!(Func::new(func_i32_i32__i32).ty, FuncType::new(
-    //         vec![Type::I32, Type::I32],
-    //         vec![Type::I32]
-    //     ));
-    //     assert_eq!(Func::new(func_i32_i32__i32_i32).ty, FuncType::new(
-    //         vec![Type::I32, Type::I32],
-    //         vec![Type::I32, Type::I32]
-    //     ));
-    //     assert_eq!(Func::new(func_f32_i32__i32_f32).ty, FuncType::new(
-    //         vec![Type::F32, Type::I32],
-    //         vec![Type::I32, Type::F32]
-    //     ));
-    // }
+    #[test]
+    fn test_function_types() {
+        assert_eq!(Func::new(func).ty(), FuncType::new(
+            vec![],
+            vec![]
+        ));
+        assert_eq!(Func::new(func__i32).ty(), FuncType::new(
+            vec![],
+            vec![Type::I32]
+        ));
+        assert_eq!(Func::new(func_i32).ty(), FuncType::new(
+            vec![Type::I32],
+            vec![]
+        ));
+        assert_eq!(Func::new(func_i32__i32).ty(), FuncType::new(
+            vec![Type::I32],
+            vec![Type::I32]
+        ));
+        assert_eq!(Func::new(func_i32_i32__i32).ty(), FuncType::new(
+            vec![Type::I32, Type::I32],
+            vec![Type::I32]
+        ));
+        assert_eq!(Func::new(func_i32_i32__i32_i32).ty(), FuncType::new(
+            vec![Type::I32, Type::I32],
+            vec![Type::I32, Type::I32]
+        ));
+        assert_eq!(Func::new(func_f32_i32__i32_f32).ty(), FuncType::new(
+            vec![Type::F32, Type::I32],
+            vec![Type::I32, Type::F32]
+        ));
+    }
 
-    // #[test]
-    // fn test_function_pointer() {
-    //     let f = Func::new(func_i32__i32);
-    //     let function = unsafe {
-    //         std::mem::transmute::<*const FunctionBody, fn(i32, i32, i32) -> i32>(f.address)
-    //     };
-    //     assert_eq!(function(1, 2, 3), 6);
-    // }
+    #[test]
+    fn test_function_pointer() {
+        let f = Func::new(func_i32__i32);
+        let function = unsafe {
+            std::mem::transmute::<*const FunctionBody, fn(i32, i32, i32) -> i32>(f.address)
+        };
+        assert_eq!(function(1, 2, 3), 6);
+    }
 
     #[test]
     fn test_function_env_pointer() {
