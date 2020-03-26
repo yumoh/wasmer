@@ -1,0 +1,24 @@
+[package]
+name = "wasm-common"
+version = "0.16.2"
+authors = ["Wasmer Engineering Team <engineering@wasmer.io>"]
+description = "WebAssembly Common Types"
+repository = "https://github.com/wasmerio/wasmer"
+license = "MIT"
+categories = ["no-std", "wasm"]
+readme = "README.md"
+keywords = ["webassembly", "wasm"]
+edition = "2018"
+
+[dependencies]
+# TODO: Syrus - Delete wasmparser dependency
+wasmparser = { version = "0.51.0", default-features = false }
+cranelift-entity = { path = "../../cranelift/entity", version = "0.59.0" }
+serde = { version = "1.0.94", features = ["derive"], optional = true }
+thiserror = "1.0.4"
+
+[features]
+default = ["std", "enable-serde"]
+std = []
+core = []
+enable-serde = ["serde", "cranelift-entity/enable-serde"]
