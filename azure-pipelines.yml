@@ -13,7 +13,7 @@ jobs:
       vmImage: "macos-10.14"
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
+      - template: ci/azure/install-rust.yml
       - script: |
           rustup component add rustfmt
         displayName: Lint dependencies
@@ -27,10 +27,10 @@ jobs:
       vmImage: "ubuntu-16.04"
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
       - script: |
           rustup component add rustfmt
           rustup component add clippy || cargo install --git https://github.com/rust-lang/rust-clippy/ --force clippy
@@ -73,10 +73,10 @@ jobs:
     condition: in(variables['Build.SourceBranch'], 'refs/heads/master', 'refs/heads/staging', 'refs/heads/trying')
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
       - bash: |
           hostname
           uname -a
@@ -112,10 +112,10 @@ jobs:
     condition: in(variables['Build.SourceBranch'], 'refs/heads/master', 'refs/heads/staging', 'refs/heads/trying')
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
       - bash: make check
         displayName: Check with Flags
         condition: and(succeeded(), not(eq(variables['Agent.OS'], 'Windows_NT')))
@@ -150,11 +150,11 @@ jobs:
       )
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
-      - template: .azure/install-innosetup.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
+      - template: ci/azure/install-innosetup.yml
       - bash: |
           mkdir -p artifacts
         displayName: Create Artifacts Dir
@@ -222,10 +222,10 @@ jobs:
       )
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
       - bash: |
           mkdir -p artifacts
         displayName: Create Artifacts Dir
@@ -265,10 +265,10 @@ jobs:
     condition: in(variables['Build.SourceBranch'], 'refs/heads/master', 'refs/heads/staging', 'refs/heads/trying')
     steps:
       - checkout: self
-      - template: .azure/install-rust.yml
-      - template: .azure/install-llvm.yml
-      - template: .azure/install-sccache.yml
-      - template: .azure/install-cmake.yml
+      - template: ci/azure/install-rust.yml
+      - template: ci/azure/install-llvm.yml
+      - template: ci/azure/install-sccache.yml
+      - template: ci/azure/install-cmake.yml
       - bash: |
           sudo apt-get install doxygen graphviz
         displayName: Install doxygen
