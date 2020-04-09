@@ -11,11 +11,15 @@ readme = "README.md"
 
 [dependencies]
 wasmer-runtime-core = { path = "../runtime-core", version = "0.16.2", features = ["generate-debug-information-no-export-symbols"] }
+wasmer-compiler = { path = "../compiler", version = "0.16.2" }
+wasm-common = { path = "../wasm-common", version = "0.16.2" }
 wasmparser = "0.51.3"
+target-lexicon = { version = "0.10.0", default-features = false }
 smallvec = "1"
 goblin = "0.1"
 libc = "0.2.60"
 byteorder = "1"
+itertools = "0.8.0"
 
 [target.'cfg(target_arch = "x86_64")'.dependencies.inkwell]
 version = "0.1.0-llvm8sample"
