@@ -373,18 +373,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "cranelift-bforest"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "306270b2299cdd5e9736ff48047257d0e846e3bb724766bb6917e66a7c294a90"
+dependencies = [
+ "cranelift-entity 0.62.0",
+]
+
+[[package]]
 name = "cranelift-codegen"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7853f77a6e4a33c67a69c40f5e1bb982bd2dc5c4a22e17e67b65bbccf9b33b2e"
 dependencies = [
  "byteorder",
- "cranelift-bforest",
- "cranelift-codegen-meta",
- "cranelift-codegen-shared",
+ "cranelift-bforest 0.59.0",
+ "cranelift-codegen-meta 0.59.0",
+ "cranelift-codegen-shared 0.59.0",
  "cranelift-entity 0.59.0",
  "gimli",
  "log",
+ "smallvec 1.2.0",
+ "target-lexicon",
+ "thiserror",
+]
+
+[[package]]
+name = "cranelift-codegen"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d697c867ac38f39bd69b67fa96ac1ac18a0e3ac641e878569f716343851f2b"
+dependencies = [
+ "byteorder",
+ "cranelift-bforest 0.62.0",
+ "cranelift-codegen-meta 0.62.0",
+ "cranelift-codegen-shared 0.62.0",
+ "cranelift-entity 0.62.0",
+ "gimli",
+ "hashbrown",
+ "log",
+ "serde",
  "smallvec 1.2.0",
  "target-lexicon",
  "thiserror",
@@ -396,8 +425,18 @@ version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "084cd6d5fb0d1da28acd72c199471bfb09acc703ec8f3bf07b1699584272a3b9"
 dependencies = [
- "cranelift-codegen-shared",
+ "cranelift-codegen-shared 0.59.0",
  "cranelift-entity 0.59.0",
+]
+
+[[package]]
+name = "cranelift-codegen-meta"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2404d7d75c8f343343a86cee4229e058925e64d40bfa2ecdab1f2242a0e1a7e1"
+dependencies = [
+ "cranelift-codegen-shared 0.62.0",
+ "cranelift-entity 0.62.0",
 ]
 
 [[package]]
@@ -405,6 +444,12 @@ name = "cranelift-codegen-shared"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "701b599783305a58c25027a4d73f2d6b599b2d8ef3f26677275f480b4d51e05d"
+
+[[package]]
+name = "cranelift-codegen-shared"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "454e53d0b552b34b57f1efc333d638520e91fdc129258fc219fc1a50ffc4d07b"
 
 [[package]]
 name = "cranelift-entity"
@@ -422,12 +467,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "cranelift-frontend"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70179dbdc8cad1bdff62dbceb06979cd1e923e218818ed3989adf253d5c7e2ac"
+dependencies = [
+ "cranelift-codegen 0.62.0",
+ "hashbrown",
+ "log",
+ "smallvec 1.2.0",
+ "target-lexicon",
+]
+
+[[package]]
 name = "cranelift-native"
 version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32daf082da21c0c05d93394ff4842c2ab7c4991b1f3186a1d952f8ac660edd0b"
 dependencies = [
- "cranelift-codegen",
+ "cranelift-codegen 0.59.0",
  "raw-cpuid",
  "target-lexicon",
 ]
@@ -2909,7 +2967,7 @@ name = "wasmer-clif-backend"
 version = "0.16.2"
 dependencies = [
  "byteorder",
- "cranelift-codegen",
+ "cranelift-codegen 0.59.0",
  "cranelift-entity 0.59.0",
  "cranelift-native",
  "libc",
@@ -2935,7 +2993,7 @@ version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c23f2824f354a00a77e4b040eef6e1d4c595a8a3e9013bad65199cc8dade9a5a"
 dependencies = [
- "cranelift-codegen",
+ "cranelift-codegen 0.59.0",
  "log",
  "smallvec 1.2.0",
  "target-lexicon",
@@ -2947,7 +3005,7 @@ version = "0.59.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a35e21d3aebc51cc6ebc0e830cf8458a9891c3482fb3c65ad18d408102929ae5"
 dependencies = [
- "cranelift-codegen",
+ "cranelift-codegen 0.59.0",
  "cranelift-entity 0.59.0",
  "log",
  "thiserror",
@@ -2970,6 +3028,27 @@ dependencies = [
  "thiserror",
  "wasm-common",
  "wasmparser",
+]
+
+[[package]]
+name = "wasmer-compiler-cranelift"
+version = "0.16.2"
+dependencies = [
+ "cranelift-codegen 0.62.0",
+ "cranelift-frontend",
+ "errno",
+ "hashbrown",
+ "lazy_static",
+ "libc",
+ "log",
+ "more-asserts",
+ "rayon",
+ "serde",
+ "target-lexicon",
+ "wasm-common",
+ "wasmer-compiler",
+ "wasmparser",
+ "winapi 0.3.8",
 ]
 
 [[package]]

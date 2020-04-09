@@ -48,6 +48,7 @@ members = [
     "lib/runtime-core",
     "lib/emscripten",
     "lib/compiler",
+    "lib/compiler-cranelift",
     "lib/wasm-common",
     "lib/win-exception-handler",
     "lib/runtime-c-api",
