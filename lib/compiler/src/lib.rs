@@ -51,6 +51,7 @@ mod module;
 mod sourceloc;
 mod traps;
 mod tunables;
+mod vm;
 
 pub use crate::compiler::Compiler;
 pub use crate::config::{CompilerConfig, CpuFeature, Features, Target};
@@ -70,6 +71,7 @@ pub use crate::translator::{
 pub use crate::traps::{TrapCode, TrapInformation};
 pub use crate::tunables::Tunables;
 pub use crate::unwind::{CompiledFunctionUnwindInfo, FDERelocEntry, FunctionTableReloc};
+pub use crate::vm::{VMBuiltinFunctionIndex, TargetSharedSignatureIndex, VMOffsets};
 
 /// Offset in bytes from the beginning of the function.
 pub type CodeOffset = u32;

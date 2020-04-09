@@ -186,7 +186,7 @@ pub struct Module {
     /// WebAssembly passive data segments.
     pub passive_data: HashMap<DataIndex, Arc<[u8]>>,
 
-    /// WebAssembly table initializers.
+    /// WebAssembly function names.
     pub func_names: HashMap<FuncIndex, String>,
 }
 
