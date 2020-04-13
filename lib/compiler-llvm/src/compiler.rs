@@ -1,5 +1,5 @@
 //! Support for compiling with LLVM.
-// Allow unused imports while developing`
+// Allow unused imports while developing.
 #![allow(unused_imports, dead_code)]
 
 use crate::config::LLVMConfig;
@@ -21,7 +21,7 @@ pub struct LLVMCompiler {
 }
 
 impl LLVMCompiler {
-    /// Creates a new Cranelift compiler
+    /// Creates a new LLVM compiler
     pub fn new(config: &LLVMConfig) -> LLVMCompiler {
         LLVMCompiler {
             config: config.clone(),

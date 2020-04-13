@@ -18,7 +18,7 @@ pub struct LLVMConfig {
 
     /// Should the Cranelift verifier be enabled.
     ///
-    /// The verifier assures that the generated Cranelift IR is valid.
+    /// The verifier assures that the generated LLVM IR is valid.
     pub enable_verifier: bool,
 
     /// The optimization levels when optimizing the IR.
@@ -74,17 +74,24 @@ impl LLVMConfig {
             _ => unimplemented!("target {} not supported", triple),
         }
 
-        if !cpu_features.contains(CpuFeature::AVX2) {
-            panic!("The target needs to support AVX2");
-        }
-
-        // The cpu features formatted as LLVM strings
+        // The CPU features formatted as LLVM strings
         let llvm_cpu_features = cpu_features.iter().filter_map(|feature| {
             match feature {
+                CpuFeature::SSE2 => Some("+sse2"),
+                CpuFeature::SSE3 => Some("+sse3"),
+                CpuFeature::SSSE3 => Some("+ssse3"),
+                CpuFeature::SSE41 => Some("+sse41"),
+                CpuFeature::SSE42 => Some("+sse42"),
+                CpuFeature::POPCNT => Some("+popcnt"),
+                CpuFeature::AVX => Some("+avx"),
+                CpuFeature::BMI1 => Some("+bmi"),
+                CpuFeature::BMI2 => Some("+bmi2"),
                 CpuFeature::AVX2 => Some("+avx2"),
-                _ => None
+                CpuFeature::AVX512DQ => Some("+avx512dq"),
+                CpuFeature::AVX512VL => Some("+avx512vl"),
+                CpuFeature::LZCNT => Some("+lzcnt"),
             }
-        }).join(" ");
+        }).join(",");
 
         let arch_string = triple.architecture.to_string();
         let llvm_target = LLVMTarget::from_name(&arch_string).unwrap();
