@@ -49,6 +49,7 @@ use wasmer_runtime_core::{
 use wasmparser::{BinaryReaderError, MemoryImmediate, Operator, Type as WpType};
 use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, TableIndex, MemoryType, SignatureIndex};
 use wasmer_compiler::Module as WasmerCompilerModule;
+use wasmer_compiler::MemoryStyle;
 
 static BACKEND_ID: &str = "llvm";
 
@@ -73,7 +74,7 @@ impl FuncTranslator {
         let module = self.ctx.create_module(module_name.as_str());
         let intrinsics = Intrinsics::declare(&module, &self.ctx);
         let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_module.local.signatures.get(
-            &wasm_module.local.functions.get(func_index).unwrap()
+            *wasm_module.local.functions.get(func_index).unwrap()
         ).unwrap());
             
         let _func = module.add_function(func_name, func_type, Some(Linkage::External));
@@ -703,7 +704,7 @@ fn resolve_memory_ptr<'ctx>(
     value_size: usize,
 ) -> Result<PointerValue<'ctx>, CodegenError> {
     // Look up the memory base (as pointer) and bounds (as unsigned integer).
-    let memory_cache = ctx.memory(MemoryIndex::new(0), intrinsics, module.clone());
+    let memory_cache = ctx.memory(MemoryIndex::from_u32(0), intrinsics, module.clone());
     let (mem_base, mem_bound, minimum, _maximum) = match memory_cache {
         MemoryCache::Dynamic {
             ptr_to_base_ptr,
@@ -757,7 +758,8 @@ fn resolve_memory_ptr<'ctx>(
             let load_offset_end = effective_offset.const_add(value_size_v);
             let ptr_in_bounds = load_offset_end.const_int_compare(
                 IntPredicate::ULE,
-                intrinsics.i64_ty.const_int(minimum.bytes().0 as u64, false),
+                // TODO: Pages to bytes conversion here
+                intrinsics.i64_ty.const_int(minimum as u64 * 65536u64, false),
             );
             if ptr_in_bounds.get_zero_extended_constant() == Some(1) {
                 Some(ptr_in_bounds)
@@ -1141,6 +1143,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
         &mut self,
         op: Operator,
         module: &Module,
+        wasm_module: &WasmerCompilerModule,
         _source_loc: u32,
     ) -> Result<(), CodegenError> {
         let mut state = &mut self.state;
@@ -1155,7 +1158,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
         let mut opcode_offset: Option<usize> = None;
 
         if !state.reachable {
-            match *op {
+            match op {
                 Operator::Block { ty: _ } | Operator::Loop { ty: _ } | Operator::If { ty: _ } => {
                     self.unreachable_depth += 1;
                     return Ok(());
@@ -1177,7 +1180,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             }
         }
 
-        match *op {
+        match op {
             /***************************
              * Control Flow instructions.
              * https://github.com/sunfishcode/wasm-reference-manual/blob/master/WebAssembly.md#control-flow-instructions
@@ -1222,6 +1225,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
 
                 builder.position_at_end(loop_body);
 
+                /*
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -1251,6 +1255,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                         );
                     }
                 }
+                */
 
                 state.push_loop(loop_body, loop_next, phis);
             }
@@ -1748,7 +1753,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             }
 
             Operator::GlobalGet { global_index } => {
-                let index = GlobalIndex::new(global_index as usize);
+                let index = GlobalIndex::from_u32(global_index);
                 let global_cache = ctx.global_cache(index, intrinsics, self.module.clone());
                 match global_cache {
                     GlobalCache::Const { value } => {
@@ -1770,7 +1775,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             Operator::GlobalSet { global_index } => {
                 let (value, info) = state.pop1_extra()?;
                 let value = apply_pending_canonicalization(builder, intrinsics, value, info);
-                let index = GlobalIndex::new(global_index as usize);
+                let index = GlobalIndex::from_u32(global_index);
                 let global_cache = ctx.global_cache(index, intrinsics, self.module.clone());
                 match global_cache {
                     GlobalCache::Mut { ptr_to_value } => {
@@ -1833,7 +1838,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 };
                 state.push1_extra(res, info);
             }
-            Operator::Call { _function_index } => {
+            Operator::Call { function_index } => {
                 // TODO
                 /*
                 let func_index = FuncIndex::new(function_index as usize);
@@ -1970,7 +1975,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 }
                 */
             }
-            Operator::CallIndirect { _index, _table_index } => {
+            Operator::CallIndirect { index, table_index } => {
                 // TODO
                 /*
                 let sig_index = SignatureIndex::new(index as usize);
@@ -5580,7 +5585,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             | Operator::I16x8AllTrue
             | Operator::I32x4AllTrue
             | Operator::I64x2AllTrue => {
-                let vec_ty = match *op {
+                let vec_ty = match op {
                     Operator::I8x16AllTrue => intrinsics.i8x16_ty,
                     Operator::I16x8AllTrue => intrinsics.i16x8_ty,
                     Operator::I32x4AllTrue => intrinsics.i32x4_ty,
@@ -8475,20 +8480,16 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             }
 
             Operator::MemoryGrow { reserved } => {
-                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(reserved as usize) {
-                    let mem_desc = &info.memories[local_mem_index];
-                    match mem_desc.memory_type() {
-                        MemoryType::Dynamic => intrinsics.memory_grow_dynamic_local,
-                        MemoryType::Static => intrinsics.memory_grow_static_local,
-                        MemoryType::SharedStatic => intrinsics.memory_grow_shared_local,
+                let mem_index = MemoryIndex::from_u32(reserved);
+                let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
+                    match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
+                        MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_local,
+                        MemoryStyle::Static { bound } => intrinsics.memory_grow_static_local,
                     }
                 } else {
-                    let import_mem_index = module.local.memory_index(reserved as usize);
-                    let mem_desc = &info.imported_memories[import_mem_index].1;
-                    match mem_desc.memory_type() {
-                        MemoryType::Dynamic => intrinsics.memory_grow_dynamic_import,
-                        MemoryType::Static => intrinsics.memory_grow_static_import,
-                        MemoryType::SharedStatic => intrinsics.memory_grow_shared_import,
+                    match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
+                        MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_import,
+                        MemoryStyle::Static { bound } => intrinsics.memory_grow_static_import,
                     }
                 };
 
@@ -8506,20 +8507,16 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 state.push1(result.try_as_basic_value().left().unwrap());
             }
             Operator::MemorySize { reserved } => {
-                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(reserved as usize) {
-                    let mem_desc = &info.memories[local_mem_index];
-                    match mem_desc.memory_type() {
-                        MemoryType::Dynamic => intrinsics.memory_size_dynamic_local,
-                        MemoryType::Static => intrinsics.memory_size_static_local,
-                        MemoryType::SharedStatic => intrinsics.memory_size_shared_local,
+                let mem_index = MemoryIndex::from_u32(reserved);
+                let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
+                    match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
+                        MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_local,
+                        MemoryStyle::Static { bound } => intrinsics.memory_size_static_local,
                     }
                 } else {
-                    let import_mem_index = module.local.memory_index(reserved as usize);
-                    let mem_desc = &info.imported_memories[import_mem_index].1;
-                    match mem_desc.memory_type() {
-                        MemoryType::Dynamic => intrinsics.memory_size_dynamic_import,
-                        MemoryType::Static => intrinsics.memory_size_static_import,
-                        MemoryType::SharedStatic => intrinsics.memory_size_shared_import,
+                    match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
+                        MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_import,
+                        MemoryStyle::Static { bound } => intrinsics.memory_size_static_import,
                     }
                 };
 

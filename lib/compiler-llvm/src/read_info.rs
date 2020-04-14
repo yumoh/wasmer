@@ -1,7 +1,10 @@
 use crate::code::CodegenError;
+/*
 use wasmer_runtime_core::parse::{wp_type_to_type, LoadError};
 use wasmer_runtime_core::types::Type;
+ */
 use wasmparser::TypeOrFuncType as WpTypeOrFuncType;
+use wasm_common::Type;
 
 pub fn blocktype_to_type(ty: WpTypeOrFuncType) -> Result<Type, CodegenError> {
     match ty {

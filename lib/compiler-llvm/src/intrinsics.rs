@@ -19,16 +19,22 @@ use inkwell::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+/*
 use wasmer_runtime_core::{
     memory::MemoryType,
     module::ModuleInfo,
     structures::TypedIndex,
     types::{
-        GlobalIndex, ImportedFuncIndex, LocalOrImport, MemoryIndex, SigIndex, TableIndex, Type,
+        GlobalIndex, ImportedFuncIndex, LocalOrImport, MemoryIndex, SignatureIndex, TableIndex, Type,
     },
     units::Pages,
     vm::{Ctx, INTERNALS_SIZE},
 };
+*/
+use wasm_common::{Type, MemoryIndex, TableIndex, GlobalIndex, SignatureIndex, FuncIndex};
+use wasm_common::entity::EntityRef;
+use wasmer_compiler::MemoryStyle;
+use wasmer_compiler::Module as WasmerCompilerModule;
 
 fn type_to_llvm_ptr<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> PointerType<'ctx> {
     match ty {
@@ -572,15 +578,19 @@ pub enum MemoryCache<'ctx> {
     Dynamic {
         ptr_to_base_ptr: PointerValue<'ctx>,
         ptr_to_bounds: PointerValue<'ctx>,
-        minimum: Pages,
-        maximum: Option<Pages>,
+        // In pages.
+        minimum: u32,
+        // In pages.
+        maximum: Option<u32>,
     },
     /// The memory is always in the same place.
     Static {
         base_ptr: PointerValue<'ctx>,
         bounds: IntValue<'ctx>,
-        minimum: Pages,
-        maximum: Option<Pages>,
+        // In pages.
+        minimum: u32,
+        // In pages.
+        maximum: Option<u32>,
     },
 }
 
@@ -603,16 +613,16 @@ struct ImportedFuncCache<'ctx> {
 pub struct CtxType<'a, 'ctx> {
     ctx_ptr_value: PointerValue<'ctx>,
 
-    info: &'a ModuleInfo,
+    wasm_module: &'a WasmerCompilerModule,
     cache_builder: Builder<'ctx>,
 
     cached_signal_mem: Option<PointerValue<'ctx>>,
 
     cached_memories: HashMap<MemoryIndex, MemoryCache<'ctx>>,
     cached_tables: HashMap<TableIndex, TableCache<'ctx>>,
-    cached_sigindices: HashMap<SigIndex, IntValue<'ctx>>,
+    cached_sigindices: HashMap<SignatureIndex, IntValue<'ctx>>,
     cached_globals: HashMap<GlobalIndex, GlobalCache<'ctx>>,
-    cached_imported_functions: HashMap<ImportedFuncIndex, ImportedFuncCache<'ctx>>,
+    cached_imported_functions: HashMap<FuncIndex, ImportedFuncCache<'ctx>>,
 }
 
 fn offset_to_index(offset: u8) -> u32 {
@@ -621,14 +631,14 @@ fn offset_to_index(offset: u8) -> u32 {
 
 impl<'a, 'ctx> CtxType<'a, 'ctx> {
     pub fn new(
-        info: &'a ModuleInfo,
+        wasm_module: &'a WasmerCompilerModule,
         func_value: &FunctionValue<'ctx>,
         cache_builder: Builder<'ctx>,
     ) -> CtxType<'a, 'ctx> {
         CtxType {
             ctx_ptr_value: func_value.get_nth_param(0).unwrap().into_pointer_value(),
 
-            info,
+            wasm_module,
             cache_builder,
 
             cached_signal_mem: None,
@@ -644,7 +654,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
     pub fn basic(&self) -> BasicValueEnum<'ctx> {
         self.ctx_ptr_value.as_basic_value_enum()
     }
-
+/*
     pub fn signal_mem(&mut self) -> PointerValue<'ctx> {
         if let Some(x) = self.cached_signal_mem {
             return x;
@@ -665,24 +675,25 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         self.cached_signal_mem = Some(ptr);
         ptr
     }
-
+*/
     pub fn memory(
         &mut self,
         index: MemoryIndex,
         intrinsics: &Intrinsics<'ctx>,
         module: Rc<RefCell<Module<'ctx>>>,
     ) -> MemoryCache<'ctx> {
-        let (cached_memories, info, ctx_ptr_value, cache_builder) = (
+        let (cached_memories, wasm_module, ctx_ptr_value, cache_builder) = (
             &mut self.cached_memories,
-            self.info,
+            self.wasm_module,
             self.ctx_ptr_value,
             &self.cache_builder,
         );
 
         *cached_memories.entry(index).or_insert_with(|| {
-            let (memory_array_ptr_ptr, index, memory_type, minimum, maximum, field_name) =
-                match index.local_or_import(info) {
-                    LocalOrImport::Local(local_mem_index) => (
+            let (memory_array_ptr_ptr, index, memory_type, minimum, maximum, field_name) = {
+                let desc = wasm_module.local.memory_plans.get(index).unwrap();
+                if let Some(local_mem_index) = wasm_module.local.defined_memory_index(index) {
+                    (
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
@@ -691,12 +702,13 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                             )
                         },
                         local_mem_index.index() as u64,
-                        info.memories[local_mem_index].memory_type(),
-                        info.memories[local_mem_index].minimum,
-                        info.memories[local_mem_index].maximum,
+                        desc.style,
+                        desc.memory.minimum,
+                        desc.memory.maximum,
                         "context_field_ptr_to_local_memory",
-                    ),
-                    LocalOrImport::Import(import_mem_index) => (
+                    )
+                } else {
+                    (
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
@@ -704,13 +716,14 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                                 "memory_array_ptr_ptr",
                             )
                         },
-                        import_mem_index.index() as u64,
-                        info.imported_memories[import_mem_index].1.memory_type(),
-                        info.imported_memories[import_mem_index].1.minimum,
-                        info.imported_memories[import_mem_index].1.maximum,
+                        index.index() as u64,
+                        desc.style,
+                        desc.memory.minimum,
+                        desc.memory.maximum,
                         "context_field_ptr_to_imported_memory",
-                    ),
-                };
+                    )
+                }
+            };
 
             let memory_array_ptr = cache_builder
                 .build_load(memory_array_ptr_ptr, "memory_array_ptr")
@@ -749,13 +762,13 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             };
 
             match memory_type {
-                MemoryType::Dynamic => MemoryCache::Dynamic {
+                MemoryStyle::Dynamic => MemoryCache::Dynamic {
                     ptr_to_base_ptr,
                     ptr_to_bounds,
                     minimum,
                     maximum,
                 },
-                MemoryType::Static | MemoryType::SharedStatic => {
+                MemoryStyle::Static { bound } => {
                     let base_ptr = cache_builder
                         .build_load(ptr_to_base_ptr, "base")
                         .into_pointer_value();
@@ -793,9 +806,9 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         intrinsics: &Intrinsics<'ctx>,
         module: Rc<RefCell<Module<'ctx>>>,
     ) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
-        let (cached_tables, info, ctx_ptr_value, cache_builder) = (
+        let (cached_tables, wasm_module, ctx_ptr_value, cache_builder) = (
             &mut self.cached_tables,
-            self.info,
+            self.wasm_module,
             self.ctx_ptr_value,
             &self.cache_builder,
         );
@@ -804,8 +817,8 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             ptr_to_base_ptr,
             ptr_to_bounds,
         } = *cached_tables.entry(index).or_insert_with(|| {
-            let (table_array_ptr_ptr, index, field_name) = match index.local_or_import(info) {
-                LocalOrImport::Local(local_table_index) => (
+            let (table_array_ptr_ptr, index, field_name) = if let Some(local_table_index) = wasm_module.local.defined_table_index(index) {
+                (
                     unsafe {
                         cache_builder.build_struct_gep(
                             ctx_ptr_value,
@@ -815,8 +828,9 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                     },
                     local_table_index.index() as u64,
                     "context_field_ptr_to_local_table",
-                ),
-                LocalOrImport::Import(import_table_index) => (
+                )
+            } else {
+                (
                     unsafe {
                         cache_builder.build_struct_gep(
                             ctx_ptr_value,
@@ -824,9 +838,9 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                             "table_array_ptr_ptr",
                         )
                     },
-                    import_table_index.index() as u64,
+                    index.index() as u64,
                     "context_field_ptr_to_import_table",
-                ),
+                )
             };
 
             let table_array_ptr = cache_builder
@@ -902,7 +916,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
 
     pub fn dynamic_sigindex(
         &mut self,
-        index: SigIndex,
+        index: SignatureIndex,
         intrinsics: &Intrinsics<'ctx>,
     ) -> IntValue<'ctx> {
         let (cached_sigindices, ctx_ptr_value, cache_builder) = (
@@ -944,49 +958,46 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         intrinsics: &Intrinsics<'ctx>,
         module: Rc<RefCell<Module<'ctx>>>,
     ) -> GlobalCache<'ctx> {
-        let (cached_globals, ctx_ptr_value, info, cache_builder) = (
+        let (cached_globals, ctx_ptr_value, wasm_module, cache_builder) = (
             &mut self.cached_globals,
             self.ctx_ptr_value,
-            self.info,
+            self.wasm_module,
             &self.cache_builder,
         );
 
         *cached_globals.entry(index).or_insert_with(|| {
-            let (globals_array_ptr_ptr, index, mutable, wasmer_ty, field_name) =
-                match index.local_or_import(info) {
-                    LocalOrImport::Local(local_global_index) => {
-                        let desc = info.globals[local_global_index].desc;
-                        (
-                            unsafe {
-                                cache_builder.build_struct_gep(
-                                    ctx_ptr_value,
-                                    offset_to_index(Ctx::offset_globals()),
-                                    "globals_array_ptr_ptr",
-                                )
-                            },
-                            local_global_index.index() as u64,
-                            desc.mutable,
-                            desc.ty,
-                            "context_field_ptr_to_local_globals",
-                        )
-                    }
-                    LocalOrImport::Import(import_global_index) => {
-                        let desc = info.imported_globals[import_global_index].1;
-                        (
-                            unsafe {
-                                cache_builder.build_struct_gep(
-                                    ctx_ptr_value,
-                                    offset_to_index(Ctx::offset_imported_globals()),
-                                    "globals_array_ptr_ptr",
-                                )
-                            },
-                            import_global_index.index() as u64,
-                            desc.mutable,
-                            desc.ty,
-                            "context_field_ptr_to_imported_globals",
-                        )
-                    }
-                };
+            let (globals_array_ptr_ptr, index, mutable, wasmer_ty, field_name) = {
+                let desc = wasm_module.local.globals.get(index).unwrap();
+                if let Some(local_global_index) = wasm_module.local.defined_global_index(index) {
+                    (
+                        unsafe {
+                            cache_builder.build_struct_gep(
+                                ctx_ptr_value,
+                                offset_to_index(Ctx::offset_globals()),
+                                "globals_array_ptr_ptr",
+                            )
+                        },
+                        index.index() as u64,
+                        desc.mutability,
+                        desc.ty,
+                        "context_field_ptr_to_local_globals",
+                    )
+                } else {
+                    (
+                        unsafe {
+                            cache_builder.build_struct_gep(
+                                ctx_ptr_value,
+                                offset_to_index(Ctx::offset_imported_globals()),
+                                "globals_array_ptr_ptr",
+                            )
+                        },
+                        index.index() as u64,
+                        desc.mutability,
+                        desc.ty,
+                        "context_field_ptr_to_imported_globals",
+                    )
+                }
+            };
 
             let llvm_ptr_ty = type_to_llvm_ptr(intrinsics, wasmer_ty);
 
@@ -1042,7 +1053,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
 
     pub fn imported_func(
         &mut self,
-        index: ImportedFuncIndex,
+        index: FuncIndex,
         intrinsics: &Intrinsics<'ctx>,
         module: Rc<RefCell<Module<'ctx>>>,
     ) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
@@ -1114,41 +1125,6 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         });
 
         (imported_func_cache.func_ptr, imported_func_cache.ctx_ptr)
-    }
-
-    pub fn internal_field(
-        &mut self,
-        index: usize,
-        intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
-        builder: &Builder<'ctx>,
-    ) -> PointerValue<'ctx> {
-        assert!(index < INTERNALS_SIZE);
-
-        let local_internals_ptr_ptr = unsafe {
-            builder.build_struct_gep(
-                self.ctx_ptr_value,
-                offset_to_index(Ctx::offset_internals()),
-                "local_internals_ptr_ptr",
-            )
-        };
-        let local_internals_ptr = builder
-            .build_load(local_internals_ptr_ptr, "local_internals_ptr")
-            .into_pointer_value();
-        tbaa_label(
-            &module,
-            intrinsics,
-            "context_field_ptr_to_internals",
-            local_internals_ptr.as_instruction_value().unwrap(),
-            None,
-        );
-        unsafe {
-            builder.build_in_bounds_gep(
-                local_internals_ptr,
-                &[intrinsics.i32_ty.const_int(index as u64, false)],
-                "local_internal_field_ptr",
-            )
-        }
     }
 }
 
