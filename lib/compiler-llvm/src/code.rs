@@ -1,35 +1,33 @@
 use crate::{
-    backend::LLVMBackend,
     intrinsics::{tbaa_label, CtxType, GlobalCache, Intrinsics, MemoryCache},
     read_info::blocktype_to_type,
     stackmap::{StackmapEntry, StackmapEntryKind, StackmapRegistry, ValueSemantic},
     state::{ControlFrame, ExtraInfo, IfElseState, State},
-    trampolines::generate_trampolines,
-    LLVMBackendConfig, LLVMCallbacks,
+    // LLVMBackendConfig, LLVMCallbacks,
 };
 use inkwell::{
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
-    passes::PassManager,
-    targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
+    //passes::PassManager,
+    //targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
     types::{
         BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
     },
     values::{
-        BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PhiValue, PointerValue,
+        BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
         VectorValue,
+        // PhiValue,
     },
-    AddressSpace, AtomicOrdering, AtomicRMWBinOp, FloatPredicate, IntPredicate, OptimizationLevel,
+    // OptimizationLevel,
+    AtomicOrdering, AtomicRMWBinOp, FloatPredicate, IntPredicate,
 };
 use smallvec::SmallVec;
 use std::{
     any::Any,
     cell::RefCell,
     collections::HashMap,
-    mem::ManuallyDrop,
     rc::Rc,
-    sync::{Arc, RwLock},
 };
 
 /*
@@ -46,8 +44,8 @@ use wasmer_runtime_core::{
     },
 };
 */
-use wasmparser::{BinaryReaderError, MemoryImmediate, Operator, Type as WpType};
-use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, TableIndex, MemoryType, SignatureIndex};
+use wasmparser::{BinaryReaderError, MemoryImmediate, Operator};
+use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, SignatureIndex};
 use wasmer_compiler::Module as WasmerCompilerModule;
 use wasmer_compiler::MemoryStyle;
 
@@ -114,6 +112,8 @@ fn type_to_llvm<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> BasicTypeEnum<
         Type::F32 => intrinsics.f32_ty.as_basic_type_enum(),
         Type::F64 => intrinsics.f64_ty.as_basic_type_enum(),
         Type::V128 => intrinsics.i128_ty.as_basic_type_enum(),
+        Type::AnyRef => unimplemented!("anyref in the llvm backend"),
+        Type::FuncRef => unimplemented!("funcref in the llvm backend"),
     }
 }
 
@@ -1142,7 +1142,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
     fn translate_operator(
         &mut self,
         op: Operator,
-        module: &Module,
+        _module: &Module,
         wasm_module: &WasmerCompilerModule,
         _source_loc: u32,
     ) -> Result<(), CodegenError> {
@@ -1152,10 +1152,10 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
         let function = self.function;
         let intrinsics = self.intrinsics.as_ref().unwrap();
         let locals = &self.locals;
-        let signatures = &self.signatures;
+        let _signatures = &self.signatures;
         let mut ctx = self.ctx.as_mut().unwrap();
 
-        let mut opcode_offset: Option<usize> = None;
+        let opcode_offset: Option<usize> = None;
 
         if !state.reachable {
             match op {
@@ -1838,7 +1838,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 };
                 state.push1_extra(res, info);
             }
-            Operator::Call { function_index } => {
+            Operator::Call { function_index: _ } => {
                 // TODO
                 /*
                 let func_index = FuncIndex::new(function_index as usize);
@@ -1975,7 +1975,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 }
                 */
             }
-            Operator::CallIndirect { index, table_index } => {
+            Operator::CallIndirect { index: _, table_index: _ } => {
                 // TODO
                 /*
                 let sig_index = SignatureIndex::new(index as usize);
@@ -8484,12 +8484,12 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
                     match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_local,
-                        MemoryStyle::Static { bound } => intrinsics.memory_grow_static_local,
+                        MemoryStyle::Static { bound: _ } => intrinsics.memory_grow_static_local,
                     }
                 } else {
                     match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_import,
-                        MemoryStyle::Static { bound } => intrinsics.memory_grow_static_import,
+                        MemoryStyle::Static { bound: _ } => intrinsics.memory_grow_static_import,
                     }
                 };
 
@@ -8511,12 +8511,12 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
                     match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_local,
-                        MemoryStyle::Static { bound } => intrinsics.memory_size_static_local,
+                        MemoryStyle::Static { bound: _ } => intrinsics.memory_size_static_local,
                     }
                 } else {
                     match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_import,
-                        MemoryStyle::Static { bound } => intrinsics.memory_size_static_import,
+                        MemoryStyle::Static { bound: _ } => intrinsics.memory_size_static_import,
                     }
                 };
 

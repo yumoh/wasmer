@@ -44,6 +44,8 @@ fn type_to_llvm_ptr<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> PointerTyp
         Type::F32 => intrinsics.f32_ptr_ty,
         Type::F64 => intrinsics.f64_ptr_ty,
         Type::V128 => intrinsics.i128_ptr_ty,
+        Type::AnyRef => unimplemented!("anyref in the llvm backend"),
+        Type::FuncRef => unimplemented!("funcref in the llvm backend"),
     }
 }
 
@@ -705,7 +707,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                             )
                         },
                         local_mem_index.index() as u64,
-                        desc.style,
+                        desc.style.clone(),
                         desc.memory.minimum,
                         desc.memory.maximum,
                         "context_field_ptr_to_local_memory",
@@ -720,7 +722,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                             )
                         },
                         index.index() as u64,
-                        desc.style,
+                        desc.style.clone(),
                         desc.memory.minimum,
                         desc.memory.maximum,
                         "context_field_ptr_to_imported_memory",
@@ -771,7 +773,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                     minimum,
                     maximum,
                 },
-                MemoryStyle::Static { bound } => {
+                MemoryStyle::Static { bound: _ } => {
                     let base_ptr = cache_builder
                         .build_load(ptr_to_base_ptr, "base")
                         .into_pointer_value();
@@ -977,7 +979,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         *cached_globals.entry(index).or_insert_with(|| {
             let (globals_array_ptr_ptr, index, mutable, wasmer_ty, field_name) = {
                 let desc = wasm_module.local.globals.get(index).unwrap();
-                if let Some(local_global_index) = wasm_module.local.defined_global_index(index) {
+                if let Some(_local_global_index) = wasm_module.local.defined_global_index(index) {
                     (
                         unsafe {
                             cache_builder.build_struct_gep(

@@ -54,11 +54,11 @@ impl Compiler for LLVMCompiler {
         _module_translation: &ModuleTranslationState,
         function_body_inputs: PrimaryMap<DefinedFuncIndex, FunctionBodyData<'_>>,
     ) -> Result<Compilation, CompileError> {
-        let functions = function_body_inputs
+        let _functions = function_body_inputs
             .into_iter()
             .collect::<Vec<(DefinedFuncIndex, &FunctionBodyData<'_>)>>()
             .par_iter()
-            .map_init(FuncTranslator::new, |func_translator, (i, input)| {
+            .map_init(FuncTranslator::new, |func_translator, (i, _input)| {
                 func_translator.translate(module, i);
             });
         unimplemented!("Compile not yet implemented");
