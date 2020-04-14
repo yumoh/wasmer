@@ -27,16 +27,6 @@ mod structs;
 mod trampolines;
 
 pub use code::LLVMFunctionCodeGenerator as FunctionCodeGenerator;
-pub use code::LLVMModuleCodeGenerator as ModuleCodeGenerator;
-
-use wasmer_runtime_core::codegen::SimpleStreamingCompilerGen;
-
-pub type LLVMCompiler = SimpleStreamingCompilerGen<
-    code::LLVMModuleCodeGenerator<'static>,
-    code::LLVMFunctionCodeGenerator<'static>,
-    backend::LLVMBackend,
-    code::CodegenError,
->;
 
 pub type InkwellModule<'ctx> = inkwell::module::Module<'ctx>;
 pub type InkwellMemoryBuffer = inkwell::memory_buffer::MemoryBuffer;

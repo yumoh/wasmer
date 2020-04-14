@@ -1,5 +1,5 @@
 use crate::code::CodegenError;
-use wasmer_runtime_core::parse::wp_type_to_type;
+use wasmer_runtime_core::parse::{wp_type_to_type, LoadError};
 use wasmer_runtime_core::types::Type;
 use wasmparser::TypeOrFuncType as WpTypeOrFuncType;
 
@@ -12,6 +12,14 @@ pub fn blocktype_to_type(ty: WpTypeOrFuncType) -> Result<Type, CodegenError> {
                     "the wasmer llvm backend does not yet support the multi-value return extension"
                         .to_string(),
             });
+        }
+    }
+}
+
+impl From<LoadError> for CodegenError {
+    fn from(other: LoadError) -> CodegenError {
+        CodegenError {
+            message: format!("{:?}", other),
         }
     }
 }

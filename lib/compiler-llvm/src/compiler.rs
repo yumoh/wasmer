@@ -3,7 +3,8 @@
 #![allow(unused_imports, dead_code)]
 
 use crate::config::LLVMConfig;
-// use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use crate::code::FuncTranslator;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use wasm_common::entity::{EntityRef, PrimaryMap};
 use wasm_common::Features;
 use wasm_common::{DefinedFuncIndex, FuncIndex, FuncType};
@@ -49,10 +50,17 @@ impl Compiler for LLVMCompiler {
     /// associated relocations.
     fn compile_module(
         &self,
-        _module: &Module,
+        module: &Module,
         _module_translation: &ModuleTranslationState,
-        _function_body_inputs: PrimaryMap<DefinedFuncIndex, FunctionBodyData<'_>>,
+        function_body_inputs: PrimaryMap<DefinedFuncIndex, FunctionBodyData<'_>>,
     ) -> Result<Compilation, CompileError> {
+        let functions = function_body_inputs
+            .into_iter()
+            .collect::<Vec<(DefinedFuncIndex, &FunctionBodyData<'_>)>>()
+            .par_iter()
+            .map_init(FuncTranslator::new, |func_translator, (i, input)| {
+                func_translator.translate(module, i);
+            });
         unimplemented!("Compile not yet implemented");
     }
 

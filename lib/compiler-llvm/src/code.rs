@@ -24,6 +24,7 @@ use inkwell::{
 };
 use smallvec::SmallVec;
 use std::{
+    any::Any,
     cell::RefCell,
     collections::HashMap,
     mem::ManuallyDrop,
@@ -31,6 +32,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+/*
 use wasmer_runtime_core::{
     backend::{CacheGen, CompilerConfig, Token},
     cache::{Artifact, Error as CacheError},
@@ -40,26 +42,55 @@ use wasmer_runtime_core::{
     parse::{wp_type_to_type, LoadError},
     structures::{Map, TypedIndex},
     types::{
-        FuncIndex, FuncSig, GlobalIndex, LocalOrImport, MemoryIndex, SigIndex, TableIndex, Type,
+        FuncIndex, GlobalIndex, LocalOrImport, MemoryIndex, SignatureIndex, TableIndex,
     },
 };
+*/
 use wasmparser::{BinaryReaderError, MemoryImmediate, Operator, Type as WpType};
+use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, TableIndex, MemoryType, SignatureIndex};
+use wasmer_compiler::Module as WasmerCompilerModule;
 
 static BACKEND_ID: &str = "llvm";
 
-fn func_sig_to_llvm<'ctx>(
+pub struct FuncTranslator {
+    ctx: Context,
+}
+
+impl FuncTranslator {
+    pub fn new() -> Self {
+        Self {
+            ctx: Context::create(),
+        }
+    }
+
+    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex) {
+        let func_index = wasm_module.local.func_index(*func_index);
+        let func_name = wasm_module.func_names.get(&func_index).unwrap().as_str();
+        let module_name = match wasm_module.name.as_ref() {
+            None => format!("<anonymous module> function {}", func_name),
+            Some(module_name) => format!("module {} function {}", module_name, func_name)
+        };
+        let module = self.ctx.create_module(module_name.as_str());
+        let intrinsics = Intrinsics::declare(&module, &self.ctx);
+        let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_module.local.signatures.get(
+            &wasm_module.local.functions.get(func_index).unwrap()
+        ).unwrap());
+            
+        let _func = module.add_function(func_name, func_type, Some(Linkage::External));
+    }
+}
+
+fn func_type_to_llvm<'ctx>(
     context: &'ctx Context,
     intrinsics: &Intrinsics<'ctx>,
-    sig: &FuncSig,
-    type_to_llvm: fn(intrinsics: &Intrinsics<'ctx>, ty: Type) -> BasicTypeEnum<'ctx>,
+    fntype: &FuncType,
 ) -> FunctionType<'ctx> {
-    let user_param_types = sig.params().iter().map(|&ty| type_to_llvm(intrinsics, ty));
-
+    let user_param_types = fntype.params().iter().map(|&ty| type_to_llvm(intrinsics, ty));
     let param_types: Vec<_> = std::iter::once(intrinsics.ctx_ptr_ty.as_basic_type_enum())
         .chain(user_param_types)
         .collect();
 
-    match sig.returns() {
+    match fntype.results() {
         &[] => intrinsics.void_ty.fn_type(&param_types, false),
         &[single_value] => type_to_llvm(intrinsics, single_value).fn_type(&param_types, false),
         returns @ _ => {
@@ -795,7 +826,6 @@ fn resolve_memory_ptr<'ctx>(
 }
 
 fn emit_stack_map<'ctx>(
-    _module_info: &ModuleInfo,
     intrinsics: &Intrinsics<'ctx>,
     builder: &Builder<'ctx>,
     local_function_id: usize,
@@ -936,6 +966,16 @@ pub struct CodegenError {
     pub message: String,
 }
 
+// TODO: breakpoints are gone, remove this.
+pub type BreakpointHandler =
+    Box<dyn Fn(BreakpointInfo) -> Result<(), Box<dyn Any + Send>> + Send + Sync + 'static>;
+
+/// Information for a breakpoint
+pub struct BreakpointInfo {
+    /// Fault.
+    pub fault: Option<()>
+}
+
 // This is only called by C++ code, the 'pub' + '#[no_mangle]' combination
 // prevents unused function elimination.
 #[no_mangle]
@@ -952,12 +992,13 @@ pub unsafe extern "C" fn callback_trampoline(
     }
 }
 
+/*
 pub struct LLVMModuleCodeGenerator<'ctx> {
     context: Option<&'ctx Context>,
     intrinsics: Option<Intrinsics<'ctx>>,
     functions: Vec<LLVMFunctionCodeGenerator<'ctx>>,
-    signatures: Map<SigIndex, FunctionType<'ctx>>,
-    function_signatures: Option<Arc<Map<FuncIndex, SigIndex>>>,
+    signatures: Map<SignatureIndex, FunctionType<'ctx>>,
+    function_signatures: Option<Arc<Map<FuncIndex, SignatureIndex>>>,
     llvm_functions: Rc<RefCell<HashMap<FuncIndex, FunctionValue<'ctx>>>>,
     func_import_count: usize,
     personality_func: ManuallyDrop<FunctionValue<'ctx>>,
@@ -967,6 +1008,7 @@ pub struct LLVMModuleCodeGenerator<'ctx> {
     target_machine: TargetMachine,
     llvm_callbacks: Option<Rc<RefCell<dyn LLVMCallbacks>>>,
 }
+*/
 
 pub struct LLVMFunctionCodeGenerator<'ctx> {
     context: Option<&'ctx Context>,
@@ -976,8 +1018,8 @@ pub struct LLVMFunctionCodeGenerator<'ctx> {
     state: State<'ctx>,
     llvm_functions: Rc<RefCell<HashMap<FuncIndex, FunctionValue<'ctx>>>>,
     function: FunctionValue<'ctx>,
-    func_sig: FuncSig,
-    signatures: Map<SigIndex, FunctionType<'ctx>>,
+    func_type: FuncType,
+    signatures: HashMap<SignatureIndex, FunctionType<'ctx>>,
     locals: Vec<PointerValue<'ctx>>, // Contains params and locals
     num_params: usize,
     ctx: Option<CtxType<'static, 'ctx>>,
@@ -989,15 +1031,9 @@ pub struct LLVMFunctionCodeGenerator<'ctx> {
     module: Rc<RefCell<Module<'ctx>>>,
 }
 
-impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ctx> {
-    fn feed_return(&mut self, _ty: WpType) -> Result<(), CodegenError> {
-        Ok(())
-    }
-
-    fn feed_param(&mut self, _ty: WpType) -> Result<(), CodegenError> {
-        Ok(())
-    }
-
+impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
+    // TODO
+    /*
     fn feed_local(&mut self, ty: WpType, count: usize, _loc: u32) -> Result<(), CodegenError> {
         let param_len = self.num_params;
 
@@ -1041,7 +1077,9 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
         }
         Ok(())
     }
+     */
 
+    /*
     fn begin_body(&mut self, module_info: &ModuleInfo) -> Result<(), CodegenError> {
         let start_of_code_block = self
             .context
@@ -1095,14 +1133,14 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 );
             }
         }
-
         Ok(())
     }
+     */
 
-    fn feed_event(
+    fn translate_operator(
         &mut self,
-        event: Event,
-        module_info: &ModuleInfo,
+        op: Operator,
+        module: &Module,
         _source_loc: u32,
     ) -> Result<(), CodegenError> {
         let mut state = &mut self.state;
@@ -1111,69 +1149,10 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
         let function = self.function;
         let intrinsics = self.intrinsics.as_ref().unwrap();
         let locals = &self.locals;
-        let info = module_info;
         let signatures = &self.signatures;
         let mut ctx = self.ctx.as_mut().unwrap();
 
         let mut opcode_offset: Option<usize> = None;
-        let op = match event {
-            Event::Wasm(x) => {
-                opcode_offset = Some(self.opcode_offset);
-                self.opcode_offset += 1;
-                x
-            }
-            Event::Internal(x) => {
-                match x {
-                    InternalEvent::FunctionBegin(_) | InternalEvent::FunctionEnd => {
-                        return Ok(());
-                    }
-                    InternalEvent::Breakpoint(callback) => {
-                        let raw = Box::into_raw(Box::new(callback)) as u64;
-                        let callback = intrinsics.i64_ty.const_int(raw, false);
-                        builder.build_call(
-                            intrinsics.throw_breakpoint,
-                            &[callback.as_basic_value_enum()],
-                            "",
-                        );
-                        return Ok(());
-                    }
-                    InternalEvent::GetInternal(idx) => {
-                        if state.reachable {
-                            let idx = idx as usize;
-                            let field_ptr =
-                                ctx.internal_field(idx, intrinsics, self.module.clone(), builder);
-                            let result = builder.build_load(field_ptr, "get_internal");
-                            tbaa_label(
-                                &self.module,
-                                intrinsics,
-                                "internal",
-                                result.as_instruction_value().unwrap(),
-                                Some(idx as u32),
-                            );
-                            state.push1(result);
-                        }
-                    }
-                    InternalEvent::SetInternal(idx) => {
-                        if state.reachable {
-                            let idx = idx as usize;
-                            let field_ptr =
-                                ctx.internal_field(idx, intrinsics, self.module.clone(), builder);
-                            let v = state.pop1()?;
-                            let store = builder.build_store(field_ptr, v);
-                            tbaa_label(
-                                &self.module,
-                                intrinsics,
-                                "internal",
-                                store,
-                                Some(idx as u32),
-                            );
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            Event::WasmOwned(ref x) => x,
-        };
 
         if !state.reachable {
             match *op {
@@ -1247,7 +1226,6 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
                         emit_stack_map(
-                            &info,
                             intrinsics,
                             builder,
                             self.index,
@@ -1549,7 +1527,6 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                     if self.track_state {
                         let mut stackmaps = self.stackmaps.borrow_mut();
                         emit_stack_map(
-                            &info,
                             intrinsics,
                             builder,
                             self.index,
@@ -1856,7 +1833,9 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 };
                 state.push1_extra(res, info);
             }
-            Operator::Call { function_index } => {
+            Operator::Call { _function_index } => {
+                // TODO
+                /*
                 let func_index = FuncIndex::new(function_index as usize);
                 let sigindex = info.func_assoc[func_index];
                 let llvm_sig = signatures[sigindex];
@@ -1989,9 +1968,12 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         }
                     }
                 }
+                */
             }
-            Operator::CallIndirect { index, table_index } => {
-                let sig_index = SigIndex::new(index as usize);
+            Operator::CallIndirect { _index, _table_index } => {
+                // TODO
+                /*
+                let sig_index = SignatureIndex::new(index as usize);
                 let expected_dynamic_sigindex = ctx.dynamic_sigindex(sig_index, intrinsics);
                 let (table_base, table_bound) = ctx.table(
                     TableIndex::new(table_index as usize),
@@ -2211,6 +2193,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                         });
                     }
                 }
+                */
             }
 
             /***************************
@@ -8492,23 +8475,20 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
             }
 
             Operator::MemoryGrow { reserved } => {
-                let memory_index = MemoryIndex::new(reserved as usize);
-                let func_value = match memory_index.local_or_import(info) {
-                    LocalOrImport::Local(local_mem_index) => {
-                        let mem_desc = &info.memories[local_mem_index];
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => intrinsics.memory_grow_dynamic_local,
-                            MemoryType::Static => intrinsics.memory_grow_static_local,
-                            MemoryType::SharedStatic => intrinsics.memory_grow_shared_local,
-                        }
+                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(reserved as usize) {
+                    let mem_desc = &info.memories[local_mem_index];
+                    match mem_desc.memory_type() {
+                        MemoryType::Dynamic => intrinsics.memory_grow_dynamic_local,
+                        MemoryType::Static => intrinsics.memory_grow_static_local,
+                        MemoryType::SharedStatic => intrinsics.memory_grow_shared_local,
                     }
-                    LocalOrImport::Import(import_mem_index) => {
-                        let mem_desc = &info.imported_memories[import_mem_index].1;
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => intrinsics.memory_grow_dynamic_import,
-                            MemoryType::Static => intrinsics.memory_grow_static_import,
-                            MemoryType::SharedStatic => intrinsics.memory_grow_shared_import,
-                        }
+                } else {
+                    let import_mem_index = module.local.memory_index(reserved as usize);
+                    let mem_desc = &info.imported_memories[import_mem_index].1;
+                    match mem_desc.memory_type() {
+                        MemoryType::Dynamic => intrinsics.memory_grow_dynamic_import,
+                        MemoryType::Static => intrinsics.memory_grow_static_import,
+                        MemoryType::SharedStatic => intrinsics.memory_grow_shared_import,
                     }
                 };
 
@@ -8526,23 +8506,20 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
                 state.push1(result.try_as_basic_value().left().unwrap());
             }
             Operator::MemorySize { reserved } => {
-                let memory_index = MemoryIndex::new(reserved as usize);
-                let func_value = match memory_index.local_or_import(info) {
-                    LocalOrImport::Local(local_mem_index) => {
-                        let mem_desc = &info.memories[local_mem_index];
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => intrinsics.memory_size_dynamic_local,
-                            MemoryType::Static => intrinsics.memory_size_static_local,
-                            MemoryType::SharedStatic => intrinsics.memory_size_shared_local,
-                        }
+                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(reserved as usize) {
+                    let mem_desc = &info.memories[local_mem_index];
+                    match mem_desc.memory_type() {
+                        MemoryType::Dynamic => intrinsics.memory_size_dynamic_local,
+                        MemoryType::Static => intrinsics.memory_size_static_local,
+                        MemoryType::SharedStatic => intrinsics.memory_size_shared_local,
                     }
-                    LocalOrImport::Import(import_mem_index) => {
-                        let mem_desc = &info.imported_memories[import_mem_index].1;
-                        match mem_desc.memory_type() {
-                            MemoryType::Dynamic => intrinsics.memory_size_dynamic_import,
-                            MemoryType::Static => intrinsics.memory_size_static_import,
-                            MemoryType::SharedStatic => intrinsics.memory_size_shared_import,
-                        }
+                } else {
+                    let import_mem_index = module.local.memory_index(reserved as usize);
+                    let mem_desc = &info.imported_memories[import_mem_index].1;
+                    match mem_desc.memory_type() {
+                        MemoryType::Dynamic => intrinsics.memory_size_dynamic_import,
+                        MemoryType::Static => intrinsics.memory_size_static_import,
+                        MemoryType::SharedStatic => intrinsics.memory_size_shared_import,
                     }
                 };
 
@@ -8567,6 +8544,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
         Ok(())
     }
 
+    /*
     fn finalize(&mut self) -> Result<(), CodegenError> {
         let results = self.state.popn_save_extra(self.func_sig.returns().len())?;
 
@@ -8597,6 +8575,7 @@ impl<'ctx> FunctionCodeGenerator<CodegenError> for LLVMFunctionCodeGenerator<'ct
         }
         Ok(())
     }
+    */
 }
 
 impl From<BinaryReaderError> for CodegenError {
@@ -8607,14 +8586,7 @@ impl From<BinaryReaderError> for CodegenError {
     }
 }
 
-impl From<LoadError> for CodegenError {
-    fn from(other: LoadError) -> CodegenError {
-        CodegenError {
-            message: format!("{:?}", other),
-        }
-    }
-}
-
+/*
 impl Drop for LLVMModuleCodeGenerator<'_> {
     fn drop(&mut self) {
         // Ensure that all members of the context are dropped before we drop the context.
@@ -8638,7 +8610,8 @@ impl Drop for LLVMModuleCodeGenerator<'_> {
         }
     }
 }
-
+*/
+/*
 impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, CodegenError>
     for LLVMModuleCodeGenerator<'ctx>
 {
@@ -8942,7 +8915,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         Ok(())
     }
 
-    fn feed_signatures(&mut self, signatures: Map<SigIndex, FuncSig>) -> Result<(), CodegenError> {
+    fn feed_signatures(&mut self, signatures: Map<SignatureIndex, FuncSig>) -> Result<(), CodegenError> {
         self.signatures = signatures
             .iter()
             .map(|(_, sig)| {
@@ -8959,7 +8932,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
 
     fn feed_function_signatures(
         &mut self,
-        assoc: Map<FuncIndex, SigIndex>,
+        assoc: Map<FuncIndex, SignatureIndex>,
     ) -> Result<(), CodegenError> {
         for (index, sig_id) in &assoc {
             if index.index() >= self.func_import_count {
@@ -8975,7 +8948,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         Ok(())
     }
 
-    fn feed_import_function(&mut self, _sigindex: SigIndex) -> Result<(), CodegenError> {
+    fn feed_import_function(&mut self, _sigindex: SignatureIndex) -> Result<(), CodegenError> {
         self.func_import_count += 1;
         Ok(())
     }
@@ -8992,6 +8965,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         })
     }
 }
+*/
 
 fn is_f32_arithmetic(bits: u32) -> bool {
     // Mask off sign bit.
