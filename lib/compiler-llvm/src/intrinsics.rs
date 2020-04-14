@@ -31,10 +31,11 @@ use wasmer_runtime_core::{
     vm::{Ctx, INTERNALS_SIZE},
 };
 */
-use wasm_common::{Type, MemoryIndex, TableIndex, GlobalIndex, SignatureIndex, FuncIndex};
+use wasm_common::{Type, MemoryIndex, TableIndex, GlobalIndex, SignatureIndex, FuncIndex, Mutability};
 use wasm_common::entity::EntityRef;
 use wasmer_compiler::MemoryStyle;
 use wasmer_compiler::Module as WasmerCompilerModule;
+use wasmer_compiler::VMOffsets;
 
 fn type_to_llvm_ptr<'ctx>(intrinsics: &Intrinsics<'ctx>, ty: Type) -> PointerType<'ctx> {
     match ty {
@@ -625,7 +626,7 @@ pub struct CtxType<'a, 'ctx> {
     cached_imported_functions: HashMap<FuncIndex, ImportedFuncCache<'ctx>>,
 }
 
-fn offset_to_index(offset: u8) -> u32 {
+fn offset_to_index(offset: u32) -> u32 {
     (offset as usize / ::std::mem::size_of::<usize>()) as u32
 }
 
@@ -688,6 +689,8 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             self.ctx_ptr_value,
             &self.cache_builder,
         );
+        // TODO: pointer width
+        let offsets = VMOffsets::new(8, &self.wasm_module.local);
 
         *cached_memories.entry(index).or_insert_with(|| {
             let (memory_array_ptr_ptr, index, memory_type, minimum, maximum, field_name) = {
@@ -697,7 +700,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
-                                offset_to_index(Ctx::offset_memories()),
+                                offset_to_index(offsets.vmctx_memories_begin()),
                                 "memory_array_ptr_ptr",
                             )
                         },
@@ -712,7 +715,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
-                                offset_to_index(Ctx::offset_imported_memories()),
+                                offset_to_index(offsets.vmctx_imported_memories_begin()),
                                 "memory_array_ptr_ptr",
                             )
                         },
@@ -812,6 +815,8 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             self.ctx_ptr_value,
             &self.cache_builder,
         );
+        // TODO: pointer width
+        let offsets = VMOffsets::new(8, &self.wasm_module.local);
 
         let TableCache {
             ptr_to_base_ptr,
@@ -822,7 +827,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                     unsafe {
                         cache_builder.build_struct_gep(
                             ctx_ptr_value,
-                            offset_to_index(Ctx::offset_tables()),
+                            offset_to_index(offsets.vmctx_tables_begin()),
                             "table_array_ptr_ptr",
                         )
                     },
@@ -834,7 +839,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                     unsafe {
                         cache_builder.build_struct_gep(
                             ctx_ptr_value,
-                            offset_to_index(Ctx::offset_imported_tables()),
+                            offset_to_index(offsets.vmctx_imported_tables_begin()),
                             "table_array_ptr_ptr",
                         )
                     },
@@ -924,12 +929,14 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             self.ctx_ptr_value,
             &self.cache_builder,
         );
+        // TODO: pointer width
+        let offsets = VMOffsets::new(8, &self.wasm_module.local);
 
         *cached_sigindices.entry(index).or_insert_with(|| {
             let sigindex_array_ptr_ptr = unsafe {
                 cache_builder.build_struct_gep(
                     ctx_ptr_value,
-                    offset_to_index(Ctx::offset_signatures()),
+                    offset_to_index(offsets.vmctx_signature_ids_begin()),
                     "sigindex_array_ptr_ptr",
                 )
             };
@@ -964,6 +971,8 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             self.wasm_module,
             &self.cache_builder,
         );
+        // TODO: pointer width
+        let offsets = VMOffsets::new(8, &self.wasm_module.local);
 
         *cached_globals.entry(index).or_insert_with(|| {
             let (globals_array_ptr_ptr, index, mutable, wasmer_ty, field_name) = {
@@ -973,7 +982,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
-                                offset_to_index(Ctx::offset_globals()),
+                                offset_to_index(offsets.vmctx_globals_begin()),
                                 "globals_array_ptr_ptr",
                             )
                         },
@@ -987,7 +996,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                         unsafe {
                             cache_builder.build_struct_gep(
                                 ctx_ptr_value,
-                                offset_to_index(Ctx::offset_imported_globals()),
+                                offset_to_index(offsets.vmctx_imported_globals_begin()),
                                 "globals_array_ptr_ptr",
                             )
                         },
@@ -1033,6 +1042,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             let global_ptr_typed =
                 cache_builder.build_pointer_cast(global_ptr, llvm_ptr_ty, "global_ptr_typed");
 
+            let mutable = mutable == Mutability::Var;
             if mutable {
                 GlobalCache::Mut {
                     ptr_to_value: global_ptr_typed,
@@ -1062,12 +1072,14 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             self.ctx_ptr_value,
             &self.cache_builder,
         );
+        // TODO: pointer width
+        let offsets = VMOffsets::new(8, &self.wasm_module.local);
 
         let imported_func_cache = cached_imported_functions.entry(index).or_insert_with(|| {
             let func_array_ptr_ptr = unsafe {
                 cache_builder.build_struct_gep(
                     ctx_ptr_value,
-                    offset_to_index(Ctx::offset_imported_funcs()),
+                    offset_to_index(offsets.vmctx_imported_functions_begin()),
                     "imported_func_array_ptr_ptr",
                 )
             };
