@@ -16,7 +16,7 @@ pub struct LLVMConfig {
     /// deterministically across different architectures.
     pub enable_nan_canonicalization: bool,
 
-    /// Should the Cranelift verifier be enabled.
+    /// Should the LLVM IR verifier be enabled.
     ///
     /// The verifier assures that the generated LLVM IR is valid.
     pub enable_verifier: bool,
