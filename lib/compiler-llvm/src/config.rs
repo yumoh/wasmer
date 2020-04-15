@@ -48,6 +48,10 @@ impl LLVMConfig {
         CodeModel::Large
     }
 
+    pub fn target_triple(&self) -> TargetTriple {
+        TargetTriple::create(&self.target().triple().to_string())
+    }
+
     /// Generates the target machine for the current target
     pub fn target_machine(&self) -> TargetMachine {
         let target = self.target();
@@ -96,7 +100,7 @@ impl LLVMConfig {
         let arch_string = triple.architecture.to_string();
         let llvm_target = LLVMTarget::from_name(&arch_string).unwrap();
         let target_machine = llvm_target.create_target_machine(
-            &TargetTriple::create(&target.triple().to_string()),
+            &self.target_triple(),
             &arch_string,
             &llvm_cpu_features,
             self.opt_level.clone(),

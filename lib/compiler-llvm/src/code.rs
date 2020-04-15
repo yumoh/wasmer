@@ -11,6 +11,7 @@ use inkwell::{
     module::{Linkage, Module},
     //passes::PassManager,
     //targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
+    targets::FileType,
     types::{
         BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
     },
@@ -44,12 +45,14 @@ use wasmer_runtime_core::{
     },
 };
 */
-use wasmparser::{BinaryReaderError, MemoryImmediate, Operator};
+use wasmparser::{BinaryReader, BinaryReaderError, MemoryImmediate, Operator};
 use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, SignatureIndex};
+use wasm_common::entity::SecondaryMap;
+use wasmer_compiler::{CompiledFunction, CompileError};
 use wasmer_compiler::Module as WasmerCompilerModule;
 use wasmer_compiler::MemoryStyle;
-
-static BACKEND_ID: &str = "llvm";
+use wasmer_compiler::CompiledFunctionUnwindInfo;
+use crate::config::LLVMConfig;
 
 pub struct FuncTranslator {
     ctx: Context,
@@ -62,20 +65,42 @@ impl FuncTranslator {
         }
     }
 
-    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex) {
+    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex, config: &LLVMConfig) -> Result<CompiledFunction, CompileError>{
         let func_index = wasm_module.local.func_index(*func_index);
         let func_name = wasm_module.func_names.get(&func_index).unwrap().as_str();
         let module_name = match wasm_module.name.as_ref() {
             None => format!("<anonymous module> function {}", func_name),
             Some(module_name) => format!("module {} function {}", module_name, func_name)
         };
-        let module = self.ctx.create_module(module_name.as_str());
+        let mut module = self.ctx.create_module(module_name.as_str());
+
+        let target_triple = config.target_triple();
+        let target_machine = config.target_machine();
+        module.set_triple(&target_triple);
+        module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+
         let intrinsics = Intrinsics::declare(&module, &self.ctx);
         let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_module.local.signatures.get(
             *wasm_module.local.functions.get(func_index).unwrap()
         ).unwrap());
             
         let _func = module.add_function(func_name, func_type, Some(Linkage::External));
+
+        // TODO: translate function from wasm to llvm IR here.
+
+        let memory_buffer = target_machine
+            .write_to_memory_buffer(&mut module, FileType::Object)
+            .unwrap();
+
+        let _mem_buf_slice = memory_buffer.as_slice();
+
+        Ok(CompiledFunction {
+            body: vec![],
+            jt_offsets: SecondaryMap::new(),
+            unwind_info: CompiledFunctionUnwindInfo::None,
+            relocations: vec![],
+            traps: vec![],
+        })
     }
 }
 

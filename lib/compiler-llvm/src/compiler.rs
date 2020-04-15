@@ -14,6 +14,7 @@ use wasmer_compiler::{CompilerConfig, ModuleTranslationState, Target};
 use wasmer_compiler::Module;
 use wasmer_compiler::{TrapCode, TrapInformation};
 
+use inkwell::targets::{InitializationConfig, Target as InkwellTarget};
 
 /// A compiler that compiles a WebAssembly module with LLVM, translating the Wasm to LLVM IR,
 /// optimizing it and then translating to assembly.
@@ -54,14 +55,18 @@ impl Compiler for LLVMCompiler {
         _module_translation: &ModuleTranslationState,
         function_body_inputs: PrimaryMap<DefinedFuncIndex, FunctionBodyData<'_>>,
     ) -> Result<Compilation, CompileError> {
-        let _functions = function_body_inputs
+        let functions = function_body_inputs
             .into_iter()
             .collect::<Vec<(DefinedFuncIndex, &FunctionBodyData<'_>)>>()
             .par_iter()
             .map_init(FuncTranslator::new, |func_translator, (i, _input)| {
-                func_translator.translate(module, i);
-            });
-        unimplemented!("Compile not yet implemented");
+                func_translator.translate(module, i, self.config())
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?
+            .into_iter()
+            .collect::<PrimaryMap<DefinedFuncIndex, _>>();
+
+        Ok(Compilation::new(functions))
     }
 
     fn compile_wasm_trampolines(
