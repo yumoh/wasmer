@@ -106,15 +106,23 @@ impl FuncTranslator {
 
         let mut reader = BinaryReader::new_with_offset(function_body.data, function_body.module_offset);
 
+        // TODO: feed_locals
+
         let pos = reader.current_position() as u32;
         let op = reader.read_operator().map_err(to_wasm_error)?;
         fcg.translate_operator(op, wasm_module, pos)?;
+
+        // TODO: finalize
 
         let memory_buffer = target_machine
             .write_to_memory_buffer(&mut module, FileType::Object)
             .unwrap();
 
-        let _mem_buf_slice = memory_buffer.as_slice();
+        //let _mem_buf_slice = memory_buffer.as_slice();
+
+        memory_buffer.create_object_file().map_err(|()| CompileError::Codegen("failed to create object file from llvm ir".to_string()))?;
+
+        // TODO: grab text section, use it to fill in 'body'.
 
         Ok(CompiledFunction {
             body: vec![],
