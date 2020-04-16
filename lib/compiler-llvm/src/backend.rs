@@ -1,4 +1,4 @@
-use super::stackmap::StackmapRegistry;
+//use super::stackmap::StackmapRegistry;
 use crate::{
     intrinsics::Intrinsics,
     structs::{Callbacks, LLVMModule, LLVMResult, MemProtect},
@@ -209,7 +209,7 @@ impl LLVMBackend {
     pub fn new(
         module: Rc<RefCell<Module>>,
         _intrinsics: Intrinsics,
-        _stackmaps: &StackmapRegistry,
+//        _stackmaps: &StackmapRegistry,
         _module_info: &ModuleInfo,
         target_machine: &TargetMachine,
         llvm_callbacks: &Option<Rc<RefCell<dyn LLVMCallbacks>>>,
@@ -242,7 +242,7 @@ impl LLVMBackend {
         }
 
         let buffer = Arc::new(Buffer::LlvmMemory(memory_buffer));
-
+/*
         #[cfg(all(
             any(target_os = "freebsd", target_os = "linux", target_os = "macos"),
             target_arch = "x86_64"
@@ -360,7 +360,7 @@ impl LLVMBackend {
                 );
             }
         }
-
+*/
         // Stackmap is not supported on this platform, or this module contains no functions so no stackmaps.
         (
             Self {

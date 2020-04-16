@@ -1,7 +1,7 @@
 use crate::{
     intrinsics::{tbaa_label, CtxType, GlobalCache, Intrinsics, MemoryCache},
     read_info::blocktype_to_type,
-    stackmap::{StackmapEntry, StackmapEntryKind, StackmapRegistry, ValueSemantic},
+    //stackmap::{StackmapEntry, StackmapEntryKind, StackmapRegistry, ValueSemantic},
     state::{ControlFrame, ExtraInfo, IfElseState, State},
     // LLVMBackendConfig, LLVMCallbacks,
 };
@@ -26,9 +26,6 @@ use inkwell::{
 use smallvec::SmallVec;
 use std::{
     any::Any,
-    cell::RefCell,
-    collections::HashMap,
-    rc::Rc,
 };
 
 /*
@@ -45,13 +42,14 @@ use wasmer_runtime_core::{
     },
 };
 */
-use wasmparser::{BinaryReader, BinaryReaderError, MemoryImmediate, Operator};
-use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex, FuncIndex, SignatureIndex};
+use wasmparser::{BinaryReader, MemoryImmediate, Operator};
+use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex};
 use wasm_common::entity::SecondaryMap;
-use wasmer_compiler::{CompiledFunction, CompileError};
+use wasmer_compiler::{to_wasm_error, CompiledFunction, CompileError};
+use wasmer_compiler::CompiledFunctionUnwindInfo;
+use wasmer_compiler::FunctionBodyData;
 use wasmer_compiler::Module as WasmerCompilerModule;
 use wasmer_compiler::MemoryStyle;
-use wasmer_compiler::CompiledFunctionUnwindInfo;
 use crate::config::LLVMConfig;
 
 pub struct FuncTranslator {
@@ -65,7 +63,7 @@ impl FuncTranslator {
         }
     }
 
-    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex, config: &LLVMConfig) -> Result<CompiledFunction, CompileError>{
+    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex, function_body: &FunctionBodyData, config: &LLVMConfig) -> Result<CompiledFunction, CompileError>{
         let func_index = wasm_module.local.func_index(*func_index);
         let func_name = wasm_module.func_names.get(&func_index).unwrap().as_str();
         let module_name = match wasm_module.name.as_ref() {
@@ -84,9 +82,33 @@ impl FuncTranslator {
             *wasm_module.local.functions.get(func_index).unwrap()
         ).unwrap());
             
-        let _func = module.add_function(func_name, func_type, Some(Linkage::External));
+        let func = module.add_function(func_name, func_type, Some(Linkage::External));
+        let entry = self.ctx.append_basic_block(func, "entry");
+        let start_of_code = self.ctx.append_basic_block(func, "start_of_code");
+        let cache_builder = self.ctx.create_builder();
+        let builder = self.ctx.create_builder();
+        cache_builder.position_at_end(entry);
+        let br = cache_builder.build_unconditional_branch(start_of_code);
+        cache_builder.position_before(&br);
+        builder.position_at_end(start_of_code);
 
-        // TODO: translate function from wasm to llvm IR here.
+        let mut fcg = LLVMFunctionCodeGenerator {
+            context: &self.ctx,
+            builder,
+            intrinsics,
+            state: State::new(),
+            function: func,
+            locals: vec![],
+            ctx: CtxType::new(wasm_module, &func, cache_builder),
+            unreachable_depth: 0,
+            module: &module,
+        };
+
+        let mut reader = BinaryReader::new_with_offset(function_body.data, function_body.module_offset);
+
+        let pos = reader.current_position() as u32;
+        let op = reader.read_operator().map_err(to_wasm_error)?;
+        fcg.translate_operator(op, wasm_module, pos)?;
 
         let memory_buffer = target_machine
             .write_to_memory_buffer(&mut module, FileType::Object)
@@ -716,20 +738,20 @@ fn canonicalize_nans<'ctx>(
     canonicalized
 }
 
-fn resolve_memory_ptr<'ctx>(
+fn resolve_memory_ptr<'ctx, 'a>(
     builder: &Builder<'ctx>,
     intrinsics: &Intrinsics<'ctx>,
     context: &'ctx Context,
-    module: Rc<RefCell<Module<'ctx>>>,
+    module: &Module<'ctx>,
     function: &FunctionValue<'ctx>,
     state: &mut State<'ctx>,
-    ctx: &mut CtxType<'static, 'ctx>,
+    ctx: &mut CtxType<'ctx, 'a>,
     memarg: &MemoryImmediate,
     ptr_ty: PointerType<'ctx>,
     value_size: usize,
-) -> Result<PointerValue<'ctx>, CodegenError> {
+) -> Result<PointerValue<'ctx>, CompileError> {
     // Look up the memory base (as pointer) and bounds (as unsigned integer).
-    let memory_cache = ctx.memory(MemoryIndex::from_u32(0), intrinsics, module.clone());
+    let memory_cache = ctx.memory(MemoryIndex::from_u32(0), intrinsics, module);
     let (mem_base, mem_bound, minimum, _maximum) = match memory_cache {
         MemoryCache::Dynamic {
             ptr_to_base_ptr,
@@ -852,6 +874,7 @@ fn resolve_memory_ptr<'ctx>(
         .into_pointer_value())
 }
 
+/*
 fn emit_stack_map<'ctx>(
     intrinsics: &Intrinsics<'ctx>,
     builder: &Builder<'ctx>,
@@ -860,7 +883,7 @@ fn emit_stack_map<'ctx>(
     kind: StackmapEntryKind,
     locals: &[PointerValue],
     state: &State<'ctx>,
-    _ctx: &mut CtxType<'_, 'ctx>,
+    _ctx: &mut CtxType<'ctx>,
     opcode_offset: usize,
 ) {
     let stackmap_id = target.entries.len();
@@ -934,7 +957,7 @@ fn finalize_opcode_stack_map<'ctx>(
         is_start: false,
     });
 }
-
+*/
 fn trap_if_misaligned<'ctx>(
     builder: &Builder<'ctx>,
     intrinsics: &Intrinsics<'ctx>,
@@ -988,11 +1011,6 @@ fn trap_if_misaligned<'ctx>(
     builder.position_at_end(continue_block);
 }
 
-#[derive(Debug)]
-pub struct CodegenError {
-    pub message: String,
-}
-
 // TODO: breakpoints are gone, remove this.
 pub type BreakpointHandler =
     Box<dyn Fn(BreakpointInfo) -> Result<(), Box<dyn Any + Send>> + Send + Sync + 'static>;
@@ -1037,31 +1055,31 @@ pub struct LLVMModuleCodeGenerator<'ctx> {
 }
 */
 
-pub struct LLVMFunctionCodeGenerator<'ctx> {
-    context: Option<&'ctx Context>,
-    builder: Option<Builder<'ctx>>,
-    alloca_builder: Option<Builder<'ctx>>,
-    intrinsics: Option<Intrinsics<'ctx>>,
+pub struct LLVMFunctionCodeGenerator<'ctx, 'a> {
+    context: &'ctx Context,
+    builder: Builder<'ctx>,
+    intrinsics: Intrinsics<'ctx>,
     state: State<'ctx>,
-    llvm_functions: Rc<RefCell<HashMap<FuncIndex, FunctionValue<'ctx>>>>,
     function: FunctionValue<'ctx>,
-    func_type: FuncType,
-    signatures: HashMap<SignatureIndex, FunctionType<'ctx>>,
     locals: Vec<PointerValue<'ctx>>, // Contains params and locals
-    num_params: usize,
-    ctx: Option<CtxType<'static, 'ctx>>,
+    ctx: CtxType<'ctx, 'a>,
     unreachable_depth: usize,
+
+    // This is support for stackmaps:
+    /*
     stackmaps: Rc<RefCell<StackmapRegistry>>,
     index: usize,
     opcode_offset: usize,
     track_state: bool,
-    module: Rc<RefCell<Module<'ctx>>>,
+    */
+
+    module: &'a Module<'ctx>,
 }
 
-impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
+impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
     // TODO
     /*
-    fn feed_local(&mut self, ty: WpType, count: usize, _loc: u32) -> Result<(), CodegenError> {
+    fn feed_local(&mut self, ty: WpType, count: usize, _loc: u32) -> Result<(), CompileError> {
         let param_len = self.num_params;
 
         let wasmer_ty = wp_type_to_type(ty)?;
@@ -1107,7 +1125,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
      */
 
     /*
-    fn begin_body(&mut self, module_info: &ModuleInfo) -> Result<(), CodegenError> {
+    fn begin_body(&mut self, module_info: &ModuleInfo) -> Result<(), CompileError> {
         let start_of_code_block = self
             .context
             .as_ref()
@@ -1167,20 +1185,19 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
     fn translate_operator(
         &mut self,
         op: Operator,
-        _module: &Module,
-        wasm_module: &WasmerCompilerModule,
+        module: &WasmerCompilerModule,
         _source_loc: u32,
-    ) -> Result<(), CodegenError> {
+    ) -> Result<(), CompileError> {
         let mut state = &mut self.state;
-        let builder = self.builder.as_ref().unwrap();
-        let context = self.context.as_ref().unwrap();
+        let builder = &self.builder;
+        let context = &self.context;
         let function = self.function;
-        let intrinsics = self.intrinsics.as_ref().unwrap();
+        let intrinsics = &self.intrinsics;
         let locals = &self.locals;
-        let _signatures = &self.signatures;
-        let mut ctx = self.ctx.as_mut().unwrap();
+        //let _signatures = &self.signatures;
+        let mut ctx = &mut self.ctx;
 
-        let opcode_offset: Option<usize> = None;
+        //let opcode_offset: Option<usize> = None;
 
         if !state.reachable {
             match op {
@@ -1211,9 +1228,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
              * https://github.com/sunfishcode/wasm-reference-manual/blob/master/WebAssembly.md#control-flow-instructions
              ***************************/
             Operator::Block { ty } => {
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                 let end_block = context.append_basic_block(function, "end");
                 builder.position_at_end(end_block);
@@ -1287,9 +1302,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             Operator::Br { relative_depth } => {
                 let frame = state.frame_at_depth(relative_depth)?;
 
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                 let value_len = if frame.is_loop() {
                     0
@@ -1318,9 +1331,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 let cond = state.pop1()?;
                 let frame = state.frame_at_depth(relative_depth)?;
 
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                 let value_len = if frame.is_loop() {
                     0
@@ -1349,11 +1360,9 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 builder.position_at_end(else_block);
             }
             Operator::BrTable { ref table } => {
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
-                let (label_depths, default_depth) = table.read_table()?;
+                let (label_depths, default_depth) = table.read_table().map_err(to_wasm_error)?;
 
                 let index = state.pop1()?;
 
@@ -1374,7 +1383,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     .iter()
                     .enumerate()
                     .map(|(case_index, &depth)| {
-                        let frame_result: Result<&ControlFrame, CodegenError> =
+                        let frame_result: Result<&ControlFrame, CompileError> =
                             state.frame_at_depth(depth);
                         let frame = match frame_result {
                             Ok(v) => v,
@@ -1398,9 +1407,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 state.reachable = false;
             }
             Operator::If { ty } => {
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
                 let if_then_block = context.append_basic_block(function, "if_then");
                 let if_else_block = context.append_basic_block(function, "if_else");
                 let end_block = context.append_basic_block(function, "if_end");
@@ -1438,9 +1445,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             Operator::Else => {
                 if state.reachable {
                     let frame = state.frame_at_depth(0)?;
-                    let current_block = builder.get_insert_block().ok_or(CodegenError {
-                        message: "not currently in a block".to_string(),
-                    })?;
+                    let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                     for phi in frame.phis().to_vec().iter().rev() {
                         let (value, info) = state.pop1_extra()?;
@@ -1471,9 +1476,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
 
             Operator::End => {
                 let frame = state.pop_frame()?;
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                 if state.reachable {
                     for phi in frame.phis().iter().rev() {
@@ -1518,9 +1521,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                                 float_ty.const_float(0.0).as_basic_value_enum()
                             }
                             _ => {
-                                return Err(CodegenError {
-                                    message: "Operator::End phi type unimplemented".to_string(),
-                                });
+                                return Err(CompileError::Codegen("Operator::End phi type unimplemented".to_string()));
                             }
                         };
                         state.push1(placeholder_value);
@@ -1529,9 +1530,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 }
             }
             Operator::Return => {
-                let current_block = builder.get_insert_block().ok_or(CodegenError {
-                    message: "not currently in a block".to_string(),
-                })?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
 
                 let frame = state.outermost_frame()?;
                 for phi in frame.phis().to_vec().iter() {
@@ -1553,6 +1552,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
 
                 // Comment out this `if` block to allow spectests to pass.
                 // TODO: fix this
+                /*
                 if let Some(offset) = opcode_offset {
                     if self.track_state {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -1578,6 +1578,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                         );
                     }
                 }
+                */
 
                 builder.build_call(
                     intrinsics.throw_trap,
@@ -1779,7 +1780,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
 
             Operator::GlobalGet { global_index } => {
                 let index = GlobalIndex::from_u32(global_index);
-                let global_cache = ctx.global_cache(index, intrinsics, self.module.clone());
+                let global_cache = ctx.global_cache(index, intrinsics, self.module);
                 match global_cache {
                     GlobalCache::Const { value } => {
                         state.push1(value);
@@ -1801,7 +1802,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 let (value, info) = state.pop1_extra()?;
                 let value = apply_pending_canonicalization(builder, intrinsics, value, info);
                 let index = GlobalIndex::from_u32(global_index);
-                let global_cache = ctx.global_cache(index, intrinsics, self.module.clone());
+                let global_cache = ctx.global_cache(index, intrinsics, self.module);
                 match global_cache {
                     GlobalCache::Mut { ptr_to_value } => {
                         let store = builder.build_store(ptr_to_value, value);
@@ -1814,9 +1815,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                         );
                     }
                     GlobalCache::Const { value: _ } => {
-                        return Err(CodegenError {
-                            message: "global is immutable".to_string(),
-                        });
+                        return Err(CompileError::Codegen("global is immutable".to_string()));
                     }
                 }
             }
@@ -1908,7 +1907,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     }
                     LocalOrImport::Import(import_func_index) => {
                         let (func_ptr_untyped, ctx_ptr) =
-                            ctx.imported_func(import_func_index, intrinsics, self.module.clone());
+                            ctx.imported_func(import_func_index, intrinsics, self.module);
 
                         let params: Vec<_> = std::iter::once(ctx_ptr.as_basic_value_enum())
                             .chain(
@@ -2008,7 +2007,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 let (table_base, table_bound) = ctx.table(
                     TableIndex::new(table_index as usize),
                     intrinsics,
-                    self.module.clone(),
+                    self.module,
                     builder,
                 );
                 let func_index = state.pop1()?.into_int_value();
@@ -2217,10 +2216,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                         });
                     }
                     _ => {
-                        return Err(CodegenError {
-                            message: "Operator::CallIndirect multi-value returns unimplemented"
-                                .to_string(),
-                        });
+                        return Err(CompileError::Codegen("Operator::CallIndirect multi-value returns unimplemented".to_string()));
                     }
                 }
                 */
@@ -4935,7 +4931,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -4963,7 +4959,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -4991,7 +4987,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5019,7 +5015,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5047,7 +5043,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5077,7 +5073,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5095,7 +5091,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5114,7 +5110,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5133,7 +5129,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5152,7 +5148,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5169,7 +5165,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5202,7 +5198,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5235,7 +5231,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5267,7 +5263,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5299,7 +5295,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5333,7 +5329,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5366,7 +5362,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5399,7 +5395,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5432,7 +5428,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5465,7 +5461,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5500,7 +5496,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5520,7 +5516,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5540,7 +5536,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5907,7 +5903,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5942,7 +5938,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -5977,7 +5973,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6012,7 +6008,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6056,7 +6052,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6085,7 +6081,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6114,7 +6110,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6147,7 +6143,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6180,7 +6176,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6213,7 +6209,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6246,7 +6242,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6280,7 +6276,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6309,7 +6305,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6338,7 +6334,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6370,7 +6366,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6401,7 +6397,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6432,7 +6428,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6474,7 +6470,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6516,7 +6512,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6555,7 +6551,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6597,7 +6593,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6639,7 +6635,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6681,7 +6677,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6720,7 +6716,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6762,7 +6758,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6804,7 +6800,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6843,7 +6839,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6885,7 +6881,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6927,7 +6923,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -6969,7 +6965,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7008,7 +7004,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7050,7 +7046,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7092,7 +7088,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7131,7 +7127,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7173,7 +7169,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7215,7 +7211,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7257,7 +7253,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7296,7 +7292,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7338,7 +7334,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7380,7 +7376,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7420,7 +7416,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7462,7 +7458,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7504,7 +7500,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7546,7 +7542,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7585,7 +7581,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7627,7 +7623,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7669,7 +7665,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7708,7 +7704,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7750,7 +7746,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7792,7 +7788,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7834,7 +7830,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7873,7 +7869,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7915,7 +7911,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7957,7 +7953,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -7996,7 +7992,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8038,7 +8034,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8080,7 +8076,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8122,7 +8118,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8164,7 +8160,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8216,7 +8212,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8268,7 +8264,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8312,7 +8308,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8364,7 +8360,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8416,7 +8412,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8468,7 +8464,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                     builder,
                     intrinsics,
                     context,
-                    self.module.clone(),
+                    self.module,
                     &function,
                     &mut state,
                     &mut ctx,
@@ -8506,13 +8502,13 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
 
             Operator::MemoryGrow { reserved } => {
                 let mem_index = MemoryIndex::from_u32(reserved);
-                let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
-                    match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
+                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(mem_index) {
+                    match module.local.memory_plans.get(module.local.memory_index(local_mem_index)).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_local,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_grow_static_local,
                     }
                 } else {
-                    match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
+                    match module.local.memory_plans.get(mem_index).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_import,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_grow_static_import,
                     }
@@ -8533,13 +8529,13 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
             }
             Operator::MemorySize { reserved } => {
                 let mem_index = MemoryIndex::from_u32(reserved);
-                let func_value = if let Some(local_mem_index) = wasm_module.local.defined_memory_index(mem_index) {
-                    match wasm_module.local.memory_plans.get(wasm_module.local.memory_index(local_mem_index)).unwrap().style {
+                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(mem_index) {
+                    match module.local.memory_plans.get(module.local.memory_index(local_mem_index)).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_local,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_size_static_local,
                     }
                 } else {
-                    match wasm_module.local.memory_plans.get(mem_index).unwrap().style {
+                    match module.local.memory_plans.get(mem_index).unwrap().style {
                         MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_import,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_size_static_import,
                     }
@@ -8557,9 +8553,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 state.push1(result.try_as_basic_value().left().unwrap());
             }
             _ => {
-                return Err(CodegenError {
-                    message: format!("Operator {:?} unimplemented", op),
-                });
+                return Err(CompileError::Codegen(format!("Operator {:?} unimplemented", op)));
             }
         }
 
@@ -8567,7 +8561,7 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
     }
 
     /*
-    fn finalize(&mut self) -> Result<(), CodegenError> {
+    fn finalize(&mut self) -> Result<(), CompileError> {
         let results = self.state.popn_save_extra(self.func_sig.returns().len())?;
 
         match results.as_slice() {
@@ -8590,22 +8584,12 @@ impl<'ctx> LLVMFunctionCodeGenerator<'ctx> {
                 )));
             }
             _ => {
-                return Err(CodegenError {
-                    message: "multi-value returns not yet implemented".to_string(),
-                });
+                return Err(CompileError::Codegen("multi-value returns not yet implemented".to_string()));
             }
         }
         Ok(())
     }
     */
-}
-
-impl From<BinaryReaderError> for CodegenError {
-    fn from(other: BinaryReaderError) -> CodegenError {
-        CodegenError {
-            message: format!("{:?}", other),
-        }
-    }
 }
 
 /*
@@ -8634,7 +8618,7 @@ impl Drop for LLVMModuleCodeGenerator<'_> {
 }
 */
 /*
-impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, CodegenError>
+impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, CompileError>
     for LLVMModuleCodeGenerator<'ctx>
 {
     fn new() -> LLVMModuleCodeGenerator<'ctx> {
@@ -8727,7 +8711,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         BACKEND_ID
     }
 
-    fn check_precondition(&mut self, _module_info: &ModuleInfo) -> Result<(), CodegenError> {
+    fn check_precondition(&mut self, _module_info: &ModuleInfo) -> Result<(), CompileError> {
         Ok(())
     }
 
@@ -8735,7 +8719,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         &mut self,
         module_info: Arc<RwLock<ModuleInfo>>,
         _loc: WasmSpan,
-    ) -> Result<&mut LLVMFunctionCodeGenerator<'ctx>, CodegenError> {
+    ) -> Result<&mut LLVMFunctionCodeGenerator<'ctx>, CompileError> {
         // Creates a new function and returns the function-scope code generator for it.
         let (context, intrinsics) = match self.functions.last_mut() {
             Some(x) => (x.context.take().unwrap(), x.intrinsics.take().unwrap()),
@@ -8842,7 +8826,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
             Option<wasmer_runtime_core::codegen::DebugMetadata>,
             Box<dyn CacheGen>,
         ),
-        CodegenError,
+        CompileError,
     > {
         let (context, intrinsics) = match self.functions.last_mut() {
             Some(x) => (x.context.take().unwrap(), x.intrinsics.take().unwrap()),
@@ -8861,7 +8845,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
             self.context.as_ref().unwrap(),
             self.intrinsics.as_ref().unwrap(),
         )
-        .map_err(|e| CodegenError {
+        .map_err(|e| CompileError {
             message: format!("trampolines generation error: {:?}", e),
         })?;
 
@@ -8927,7 +8911,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         Ok((backend, None, Box::new(cache_gen)))
     }
 
-    fn feed_compiler_config(&mut self, config: &CompilerConfig) -> Result<(), CodegenError> {
+    fn feed_compiler_config(&mut self, config: &CompilerConfig) -> Result<(), CompileError> {
         self.track_state = config.track_state;
         if let Some(backend_compiler_config) = &config.backend_specific_config {
             if let Some(llvm_config) = backend_compiler_config.get_specific::<LLVMBackendConfig>() {
@@ -8937,7 +8921,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         Ok(())
     }
 
-    fn feed_signatures(&mut self, signatures: Map<SignatureIndex, FuncSig>) -> Result<(), CodegenError> {
+    fn feed_signatures(&mut self, signatures: Map<SignatureIndex, FuncSig>) -> Result<(), CompileError> {
         self.signatures = signatures
             .iter()
             .map(|(_, sig)| {
@@ -8955,7 +8939,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
     fn feed_function_signatures(
         &mut self,
         assoc: Map<FuncIndex, SignatureIndex>,
-    ) -> Result<(), CodegenError> {
+    ) -> Result<(), CompileError> {
         for (index, sig_id) in &assoc {
             if index.index() >= self.func_import_count {
                 let function = self.module.borrow_mut().add_function(
@@ -8970,7 +8954,7 @@ impl<'ctx> ModuleCodeGenerator<LLVMFunctionCodeGenerator<'ctx>, LLVMBackend, Cod
         Ok(())
     }
 
-    fn feed_import_function(&mut self, _sigindex: SignatureIndex) -> Result<(), CodegenError> {
+    fn feed_import_function(&mut self, _sigindex: SignatureIndex) -> Result<(), CompileError> {
         self.func_import_count += 1;
         Ok(())
     }

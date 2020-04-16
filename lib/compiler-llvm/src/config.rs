@@ -56,7 +56,7 @@ impl LLVMConfig {
     pub fn target_machine(&self) -> TargetMachine {
         let target = self.target();
         let triple = target.triple();
-        let cpu_features = target.cpu_features().clone();
+        let cpu_features = &target.cpu_features();
 
         match triple.architecture {
             Architecture::X86_64 => LLVMTarget::initialize_x86(&InitializationConfig {

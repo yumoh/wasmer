@@ -21,7 +21,7 @@ mod code;
 mod intrinsics;
 mod platform;
 mod read_info;
-mod stackmap;
+//mod stackmap;
 mod state;
 mod structs;
 mod trampolines;

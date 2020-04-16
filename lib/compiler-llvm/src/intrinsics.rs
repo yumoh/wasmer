@@ -16,9 +16,7 @@ use inkwell::{
     },
     AddressSpace,
 };
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 /*
 use wasmer_runtime_core::{
     memory::MemoryType,
@@ -613,7 +611,7 @@ struct ImportedFuncCache<'ctx> {
     ctx_ptr: PointerValue<'ctx>,
 }
 
-pub struct CtxType<'a, 'ctx> {
+pub struct CtxType<'ctx, 'a> {
     ctx_ptr_value: PointerValue<'ctx>,
 
     wasm_module: &'a WasmerCompilerModule,
@@ -632,12 +630,12 @@ fn offset_to_index(offset: u32) -> u32 {
     (offset as usize / ::std::mem::size_of::<usize>()) as u32
 }
 
-impl<'a, 'ctx> CtxType<'a, 'ctx> {
+impl<'ctx, 'a> CtxType<'ctx, 'a> {
     pub fn new(
         wasm_module: &'a WasmerCompilerModule,
         func_value: &FunctionValue<'ctx>,
         cache_builder: Builder<'ctx>,
-    ) -> CtxType<'a, 'ctx> {
+    ) -> CtxType<'ctx, 'a> {
         CtxType {
             ctx_ptr_value: func_value.get_nth_param(0).unwrap().into_pointer_value(),
 
@@ -683,7 +681,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         &mut self,
         index: MemoryIndex,
         intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
+        module: &Module<'ctx>,
     ) -> MemoryCache<'ctx> {
         let (cached_memories, wasm_module, ctx_ptr_value, cache_builder) = (
             &mut self.cached_memories,
@@ -734,7 +732,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(memory_array_ptr_ptr, "memory_array_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 field_name,
                 memory_array_ptr.as_instruction_value().unwrap(),
@@ -752,7 +750,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(memory_ptr_ptr, "memory_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "memory_ptr",
                 memory_ptr.as_instruction_value().unwrap(),
@@ -781,14 +779,14 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                         .build_load(ptr_to_bounds, "bounds")
                         .into_int_value();
                     tbaa_label(
-                        &module,
+                        module,
                         intrinsics,
                         "static_memory_base",
                         base_ptr.as_instruction_value().unwrap(),
                         Some(index as u32),
                     );
                     tbaa_label(
-                        &module,
+                        module,
                         intrinsics,
                         "static_memory_bounds",
                         bounds.as_instruction_value().unwrap(),
@@ -809,7 +807,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         &mut self,
         index: TableIndex,
         intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
+        module: &Module<'ctx>,
     ) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
         let (cached_tables, wasm_module, ctx_ptr_value, cache_builder) = (
             &mut self.cached_tables,
@@ -854,7 +852,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(table_array_ptr_ptr, "table_array_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 field_name,
                 table_array_ptr.as_instruction_value().unwrap(),
@@ -868,7 +866,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(table_ptr_ptr, "table_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "table_ptr",
                 table_array_ptr.as_instruction_value().unwrap(),
@@ -895,24 +893,24 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         &mut self,
         index: TableIndex,
         intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
+        module: &Module<'ctx>,
         builder: &Builder<'ctx>,
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
         let (ptr_to_base_ptr, ptr_to_bounds) =
-            self.table_prepare(index, intrinsics, module.clone());
+            self.table_prepare(index, intrinsics, module);
         let base_ptr = builder
             .build_load(ptr_to_base_ptr, "base_ptr")
             .into_pointer_value();
         let bounds = builder.build_load(ptr_to_bounds, "bounds").into_int_value();
         tbaa_label(
-            &module,
+            module,
             intrinsics,
             "table_base_ptr",
             base_ptr.as_instruction_value().unwrap(),
             Some(index.index() as u32),
         );
         tbaa_label(
-            &module,
+            module,
             intrinsics,
             "table_bounds",
             bounds.as_instruction_value().unwrap(),
@@ -965,7 +963,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         &mut self,
         index: GlobalIndex,
         intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
+        module: &Module<'ctx>,
     ) -> GlobalCache<'ctx> {
         let (cached_globals, ctx_ptr_value, wasm_module, cache_builder) = (
             &mut self.cached_globals,
@@ -1016,7 +1014,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(globals_array_ptr_ptr, "global_array_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 field_name,
                 global_array_ptr.as_instruction_value().unwrap(),
@@ -1034,7 +1032,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(global_ptr_ptr, "global_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "global_ptr",
                 global_ptr.as_instruction_value().unwrap(),
@@ -1052,7 +1050,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
             } else {
                 let value = cache_builder.build_load(global_ptr_typed, "global_value");
                 tbaa_label(
-                    &module,
+                    module,
                     intrinsics,
                     "global",
                     value.as_instruction_value().unwrap(),
@@ -1067,7 +1065,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
         &mut self,
         index: FuncIndex,
         intrinsics: &Intrinsics<'ctx>,
-        module: Rc<RefCell<Module<'ctx>>>,
+        module: &Module<'ctx>,
     ) -> (PointerValue<'ctx>, PointerValue<'ctx>) {
         let (cached_imported_functions, ctx_ptr_value, cache_builder) = (
             &mut self.cached_imported_functions,
@@ -1089,7 +1087,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(func_array_ptr_ptr, "func_array_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "context_field_ptr_to_imported_funcs",
                 func_array_ptr.as_instruction_value().unwrap(),
@@ -1121,14 +1119,14 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
                 .build_load(ctx_ptr_ptr, "ctx_ptr")
                 .into_pointer_value();
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "imported_func_ptr",
                 func_ptr.as_instruction_value().unwrap(),
                 Some(index.index() as u32),
             );
             tbaa_label(
-                &module,
+                module,
                 intrinsics,
                 "imported_func_ctx_ptr",
                 ctx_ptr.as_instruction_value().unwrap(),
@@ -1145,7 +1143,7 @@ impl<'a, 'ctx> CtxType<'a, 'ctx> {
 // Given an instruction that operates on memory, mark the access as not aliasing
 // other memory accesses which have a different (label, index) pair.
 pub fn tbaa_label<'ctx>(
-    module: &Rc<RefCell<Module<'ctx>>>,
+    module: &Module<'ctx>,
     intrinsics: &Intrinsics<'ctx>,
     label: &str,
     instruction: InstructionValue<'ctx>,
@@ -1164,7 +1162,6 @@ pub fn tbaa_label<'ctx>(
     // MayAlias and MustAlias in the LLVM documentation:
     //   https://llvm.org/docs/AliasAnalysis.html#must-may-and-no-alias-responses
 
-    let module = module.borrow_mut();
     let context = module.get_context();
 
     // TODO: ContextRef can't return us the lifetime from module through Deref.

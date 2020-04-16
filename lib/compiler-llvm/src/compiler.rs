@@ -59,8 +59,8 @@ impl Compiler for LLVMCompiler {
             .into_iter()
             .collect::<Vec<(DefinedFuncIndex, &FunctionBodyData<'_>)>>()
             .par_iter()
-            .map_init(FuncTranslator::new, |func_translator, (i, _input)| {
-                func_translator.translate(module, i, self.config())
+            .map_init(FuncTranslator::new, |func_translator, (i, input)| {
+                func_translator.translate(module, i, input, self.config())
             })
             .collect::<Result<Vec<_>, CompileError>>()?
             .into_iter()
