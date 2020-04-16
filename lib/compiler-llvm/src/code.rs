@@ -16,17 +16,23 @@ use inkwell::{
         BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
     },
     values::{
-        BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PointerValue,
+        BasicValue,
+        BasicValueEnum,
+        FloatValue,
+        FunctionValue,
+        IntValue,
+        PointerValue,
         VectorValue,
         // PhiValue,
     },
     // OptimizationLevel,
-    AtomicOrdering, AtomicRMWBinOp, FloatPredicate, IntPredicate,
+    AtomicOrdering,
+    AtomicRMWBinOp,
+    FloatPredicate,
+    IntPredicate,
 };
 use smallvec::SmallVec;
-use std::{
-    any::Any,
-};
+use std::any::Any;
 
 /*
 use wasmer_runtime_core::{
@@ -42,15 +48,15 @@ use wasmer_runtime_core::{
     },
 };
 */
-use wasmparser::{BinaryReader, MemoryImmediate, Operator};
-use wasm_common::{DefinedFuncIndex, FuncType, Type, MemoryIndex, GlobalIndex};
+use crate::config::LLVMConfig;
 use wasm_common::entity::SecondaryMap;
-use wasmer_compiler::{to_wasm_error, CompiledFunction, CompileError};
+use wasm_common::{DefinedFuncIndex, FuncType, GlobalIndex, MemoryIndex, Type};
 use wasmer_compiler::CompiledFunctionUnwindInfo;
 use wasmer_compiler::FunctionBodyData;
-use wasmer_compiler::Module as WasmerCompilerModule;
 use wasmer_compiler::MemoryStyle;
-use crate::config::LLVMConfig;
+use wasmer_compiler::Module as WasmerCompilerModule;
+use wasmer_compiler::{to_wasm_error, CompileError, CompiledFunction};
+use wasmparser::{BinaryReader, MemoryImmediate, Operator};
 
 pub struct FuncTranslator {
     ctx: Context,
@@ -63,12 +69,18 @@ impl FuncTranslator {
         }
     }
 
-    pub fn translate(&mut self, wasm_module: &WasmerCompilerModule, func_index: &DefinedFuncIndex, function_body: &FunctionBodyData, config: &LLVMConfig) -> Result<CompiledFunction, CompileError>{
+    pub fn translate(
+        &mut self,
+        wasm_module: &WasmerCompilerModule,
+        func_index: &DefinedFuncIndex,
+        function_body: &FunctionBodyData,
+        config: &LLVMConfig,
+    ) -> Result<CompiledFunction, CompileError> {
         let func_index = wasm_module.local.func_index(*func_index);
         let func_name = wasm_module.func_names.get(&func_index).unwrap().as_str();
         let module_name = match wasm_module.name.as_ref() {
             None => format!("<anonymous module> function {}", func_name),
-            Some(module_name) => format!("module {} function {}", module_name, func_name)
+            Some(module_name) => format!("module {} function {}", module_name, func_name),
         };
         let mut module = self.ctx.create_module(module_name.as_str());
 
@@ -78,10 +90,16 @@ impl FuncTranslator {
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
 
         let intrinsics = Intrinsics::declare(&module, &self.ctx);
-        let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_module.local.signatures.get(
-            *wasm_module.local.functions.get(func_index).unwrap()
-        ).unwrap());
-            
+        let func_type = func_type_to_llvm(
+            &self.ctx,
+            &intrinsics,
+            wasm_module
+                .local
+                .signatures
+                .get(*wasm_module.local.functions.get(func_index).unwrap())
+                .unwrap(),
+        );
+
         let func = module.add_function(func_name, func_type, Some(Linkage::External));
         let entry = self.ctx.append_basic_block(func, "entry");
         let start_of_code = self.ctx.append_basic_block(func, "start_of_code");
@@ -104,7 +122,8 @@ impl FuncTranslator {
             module: &module,
         };
 
-        let mut reader = BinaryReader::new_with_offset(function_body.data, function_body.module_offset);
+        let mut reader =
+            BinaryReader::new_with_offset(function_body.data, function_body.module_offset);
 
         // TODO: feed_locals
 
@@ -120,7 +139,9 @@ impl FuncTranslator {
 
         //let _mem_buf_slice = memory_buffer.as_slice();
 
-        memory_buffer.create_object_file().map_err(|()| CompileError::Codegen("failed to create object file from llvm ir".to_string()))?;
+        memory_buffer.create_object_file().map_err(|()| {
+            CompileError::Codegen("failed to create object file from llvm ir".to_string())
+        })?;
 
         // TODO: grab text section, use it to fill in 'body'.
 
@@ -139,7 +160,10 @@ fn func_type_to_llvm<'ctx>(
     intrinsics: &Intrinsics<'ctx>,
     fntype: &FuncType,
 ) -> FunctionType<'ctx> {
-    let user_param_types = fntype.params().iter().map(|&ty| type_to_llvm(intrinsics, ty));
+    let user_param_types = fntype
+        .params()
+        .iter()
+        .map(|&ty| type_to_llvm(intrinsics, ty));
     let param_types: Vec<_> = std::iter::once(intrinsics.ctx_ptr_ty.as_basic_type_enum())
         .chain(user_param_types)
         .collect();
@@ -814,7 +838,9 @@ fn resolve_memory_ptr<'ctx, 'a>(
             let ptr_in_bounds = load_offset_end.const_int_compare(
                 IntPredicate::ULE,
                 // TODO: Pages to bytes conversion here
-                intrinsics.i64_ty.const_int(minimum as u64 * 65536u64, false),
+                intrinsics
+                    .i64_ty
+                    .const_int(minimum as u64 * 65536u64, false),
             );
             if ptr_in_bounds.get_zero_extended_constant() == Some(1) {
                 Some(ptr_in_bounds)
@@ -1026,7 +1052,7 @@ pub type BreakpointHandler =
 /// Information for a breakpoint
 pub struct BreakpointInfo {
     /// Fault.
-    pub fault: Option<()>
+    pub fault: Option<()>,
 }
 
 // This is only called by C++ code, the 'pub' + '#[no_mangle]' combination
@@ -1080,7 +1106,6 @@ pub struct LLVMFunctionCodeGenerator<'ctx, 'a> {
     opcode_offset: usize,
     track_state: bool,
     */
-
     module: &'a Module<'ctx>,
 }
 
@@ -1236,7 +1261,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
              * https://github.com/sunfishcode/wasm-reference-manual/blob/master/WebAssembly.md#control-flow-instructions
              ***************************/
             Operator::Block { ty } => {
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 let end_block = context.append_basic_block(function, "end");
                 builder.position_at_end(end_block);
@@ -1310,7 +1337,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
             Operator::Br { relative_depth } => {
                 let frame = state.frame_at_depth(relative_depth)?;
 
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 let value_len = if frame.is_loop() {
                     0
@@ -1339,7 +1368,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 let cond = state.pop1()?;
                 let frame = state.frame_at_depth(relative_depth)?;
 
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 let value_len = if frame.is_loop() {
                     0
@@ -1368,7 +1399,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 builder.position_at_end(else_block);
             }
             Operator::BrTable { ref table } => {
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 let (label_depths, default_depth) = table.read_table().map_err(to_wasm_error)?;
 
@@ -1415,7 +1448,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 state.reachable = false;
             }
             Operator::If { ty } => {
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
                 let if_then_block = context.append_basic_block(function, "if_then");
                 let if_else_block = context.append_basic_block(function, "if_else");
                 let end_block = context.append_basic_block(function, "if_end");
@@ -1453,7 +1488,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
             Operator::Else => {
                 if state.reachable {
                     let frame = state.frame_at_depth(0)?;
-                    let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                    let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                        "not currently in a block".to_string(),
+                    ))?;
 
                     for phi in frame.phis().to_vec().iter().rev() {
                         let (value, info) = state.pop1_extra()?;
@@ -1484,7 +1521,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
 
             Operator::End => {
                 let frame = state.pop_frame()?;
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 if state.reachable {
                     for phi in frame.phis().iter().rev() {
@@ -1529,7 +1568,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                                 float_ty.const_float(0.0).as_basic_value_enum()
                             }
                             _ => {
-                                return Err(CompileError::Codegen("Operator::End phi type unimplemented".to_string()));
+                                return Err(CompileError::Codegen(
+                                    "Operator::End phi type unimplemented".to_string(),
+                                ));
                             }
                         };
                         state.push1(placeholder_value);
@@ -1538,7 +1579,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 }
             }
             Operator::Return => {
-                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen("not currently in a block".to_string()))?;
+                let current_block = builder.get_insert_block().ok_or(CompileError::Codegen(
+                    "not currently in a block".to_string(),
+                ))?;
 
                 let frame = state.outermost_frame()?;
                 for phi in frame.phis().to_vec().iter() {
@@ -2007,7 +2050,10 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 }
                 */
             }
-            Operator::CallIndirect { index: _, table_index: _ } => {
+            Operator::CallIndirect {
+                index: _,
+                table_index: _,
+            } => {
                 // TODO
                 /*
                 let sig_index = SignatureIndex::new(index as usize);
@@ -8510,8 +8556,16 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
 
             Operator::MemoryGrow { reserved } => {
                 let mem_index = MemoryIndex::from_u32(reserved);
-                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(mem_index) {
-                    match module.local.memory_plans.get(module.local.memory_index(local_mem_index)).unwrap().style {
+                let func_value = if let Some(local_mem_index) =
+                    module.local.defined_memory_index(mem_index)
+                {
+                    match module
+                        .local
+                        .memory_plans
+                        .get(module.local.memory_index(local_mem_index))
+                        .unwrap()
+                        .style
+                    {
                         MemoryStyle::Dynamic => intrinsics.memory_grow_dynamic_local,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_grow_static_local,
                     }
@@ -8537,8 +8591,16 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
             }
             Operator::MemorySize { reserved } => {
                 let mem_index = MemoryIndex::from_u32(reserved);
-                let func_value = if let Some(local_mem_index) = module.local.defined_memory_index(mem_index) {
-                    match module.local.memory_plans.get(module.local.memory_index(local_mem_index)).unwrap().style {
+                let func_value = if let Some(local_mem_index) =
+                    module.local.defined_memory_index(mem_index)
+                {
+                    match module
+                        .local
+                        .memory_plans
+                        .get(module.local.memory_index(local_mem_index))
+                        .unwrap()
+                        .style
+                    {
                         MemoryStyle::Dynamic => intrinsics.memory_size_dynamic_local,
                         MemoryStyle::Static { bound: _ } => intrinsics.memory_size_static_local,
                     }
@@ -8561,7 +8623,10 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 state.push1(result.try_as_basic_value().left().unwrap());
             }
             _ => {
-                return Err(CompileError::Codegen(format!("Operator {:?} unimplemented", op)));
+                return Err(CompileError::Codegen(format!(
+                    "Operator {:?} unimplemented",
+                    op
+                )));
             }
         }
 

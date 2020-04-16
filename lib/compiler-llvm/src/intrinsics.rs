@@ -29,8 +29,10 @@ use wasmer_runtime_core::{
     vm::{Ctx, INTERNALS_SIZE},
 };
 */
-use wasm_common::{Type, MemoryIndex, TableIndex, GlobalIndex, SignatureIndex, FuncIndex, Mutability};
 use wasm_common::entity::EntityRef;
+use wasm_common::{
+    FuncIndex, GlobalIndex, MemoryIndex, Mutability, SignatureIndex, TableIndex, Type,
+};
 use wasmer_compiler::MemoryStyle;
 use wasmer_compiler::Module as WasmerCompilerModule;
 use wasmer_compiler::VMOffsets;
@@ -655,28 +657,28 @@ impl<'ctx, 'a> CtxType<'ctx, 'a> {
     pub fn basic(&self) -> BasicValueEnum<'ctx> {
         self.ctx_ptr_value.as_basic_value_enum()
     }
-/*
-    pub fn signal_mem(&mut self) -> PointerValue<'ctx> {
-        if let Some(x) = self.cached_signal_mem {
-            return x;
+    /*
+        pub fn signal_mem(&mut self) -> PointerValue<'ctx> {
+            if let Some(x) = self.cached_signal_mem {
+                return x;
+            }
+
+            let (ctx_ptr_value, cache_builder) = (self.ctx_ptr_value, &self.cache_builder);
+
+            let ptr_ptr = unsafe {
+                cache_builder.build_struct_gep(
+                    ctx_ptr_value,
+                    offset_to_index(Ctx::offset_interrupt_signal_mem()),
+                    "interrupt_signal_mem_ptr",
+                )
+            };
+            let ptr = cache_builder
+                .build_load(ptr_ptr, "interrupt_signal_mem")
+                .into_pointer_value();
+            self.cached_signal_mem = Some(ptr);
+            ptr
         }
-
-        let (ctx_ptr_value, cache_builder) = (self.ctx_ptr_value, &self.cache_builder);
-
-        let ptr_ptr = unsafe {
-            cache_builder.build_struct_gep(
-                ctx_ptr_value,
-                offset_to_index(Ctx::offset_interrupt_signal_mem()),
-                "interrupt_signal_mem_ptr",
-            )
-        };
-        let ptr = cache_builder
-            .build_load(ptr_ptr, "interrupt_signal_mem")
-            .into_pointer_value();
-        self.cached_signal_mem = Some(ptr);
-        ptr
-    }
-*/
+    */
     pub fn memory(
         &mut self,
         index: MemoryIndex,
@@ -822,31 +824,32 @@ impl<'ctx, 'a> CtxType<'ctx, 'a> {
             ptr_to_base_ptr,
             ptr_to_bounds,
         } = *cached_tables.entry(index).or_insert_with(|| {
-            let (table_array_ptr_ptr, index, field_name) = if let Some(local_table_index) = wasm_module.local.defined_table_index(index) {
-                (
-                    unsafe {
-                        cache_builder.build_struct_gep(
-                            ctx_ptr_value,
-                            offset_to_index(offsets.vmctx_tables_begin()),
-                            "table_array_ptr_ptr",
-                        )
-                    },
-                    local_table_index.index() as u64,
-                    "context_field_ptr_to_local_table",
-                )
-            } else {
-                (
-                    unsafe {
-                        cache_builder.build_struct_gep(
-                            ctx_ptr_value,
-                            offset_to_index(offsets.vmctx_imported_tables_begin()),
-                            "table_array_ptr_ptr",
-                        )
-                    },
-                    index.index() as u64,
-                    "context_field_ptr_to_import_table",
-                )
-            };
+            let (table_array_ptr_ptr, index, field_name) =
+                if let Some(local_table_index) = wasm_module.local.defined_table_index(index) {
+                    (
+                        unsafe {
+                            cache_builder.build_struct_gep(
+                                ctx_ptr_value,
+                                offset_to_index(offsets.vmctx_tables_begin()),
+                                "table_array_ptr_ptr",
+                            )
+                        },
+                        local_table_index.index() as u64,
+                        "context_field_ptr_to_local_table",
+                    )
+                } else {
+                    (
+                        unsafe {
+                            cache_builder.build_struct_gep(
+                                ctx_ptr_value,
+                                offset_to_index(offsets.vmctx_imported_tables_begin()),
+                                "table_array_ptr_ptr",
+                            )
+                        },
+                        index.index() as u64,
+                        "context_field_ptr_to_import_table",
+                    )
+                };
 
             let table_array_ptr = cache_builder
                 .build_load(table_array_ptr_ptr, "table_array_ptr")
@@ -896,8 +899,7 @@ impl<'ctx, 'a> CtxType<'ctx, 'a> {
         module: &Module<'ctx>,
         builder: &Builder<'ctx>,
     ) -> (PointerValue<'ctx>, IntValue<'ctx>) {
-        let (ptr_to_base_ptr, ptr_to_bounds) =
-            self.table_prepare(index, intrinsics, module);
+        let (ptr_to_base_ptr, ptr_to_bounds) = self.table_prepare(index, intrinsics, module);
         let base_ptr = builder
             .build_load(ptr_to_base_ptr, "base_ptr")
             .into_pointer_value();

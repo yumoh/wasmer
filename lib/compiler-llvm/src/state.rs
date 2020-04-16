@@ -230,7 +230,9 @@ impl<'ctx> State<'ctx> {
     }
 
     pub fn outermost_frame(&self) -> Result<&ControlFrame<'ctx>, CompileError> {
-        self.control_stack.get(0).ok_or(CompileError::Codegen("outermost_frame: invalid control stack depth".to_string()))
+        self.control_stack.get(0).ok_or(CompileError::Codegen(
+            "outermost_frame: invalid control stack depth".to_string(),
+        ))
     }
 
     pub fn frame_at_depth(&self, depth: u32) -> Result<&ControlFrame<'ctx>, CompileError> {
@@ -238,7 +240,9 @@ impl<'ctx> State<'ctx> {
             .control_stack
             .len()
             .checked_sub(1 + (depth as usize))
-            .ok_or(CompileError::Codegen("frame_at_depth: invalid control stack depth".to_string()))?;
+            .ok_or(CompileError::Codegen(
+                "frame_at_depth: invalid control stack depth".to_string(),
+            ))?;
         Ok(&self.control_stack[index])
     }
 
@@ -250,12 +254,16 @@ impl<'ctx> State<'ctx> {
             .control_stack
             .len()
             .checked_sub(1 + (depth as usize))
-            .ok_or(CompileError::Codegen("frame_at_depth_mut: invalid control stack depth".to_string()))?;
+            .ok_or(CompileError::Codegen(
+                "frame_at_depth_mut: invalid control stack depth".to_string(),
+            ))?;
         Ok(&mut self.control_stack[index])
     }
 
     pub fn pop_frame(&mut self) -> Result<ControlFrame<'ctx>, CompileError> {
-        self.control_stack.pop().ok_or(CompileError::Codegen("pop_frame: cannot pop from control stack".to_string()))
+        self.control_stack.pop().ok_or(CompileError::Codegen(
+            "pop_frame: cannot pop from control stack".to_string(),
+        ))
     }
 
     pub fn var_name(&self) -> String {
@@ -278,7 +286,9 @@ impl<'ctx> State<'ctx> {
     }
 
     pub fn pop1_extra(&mut self) -> Result<(BasicValueEnum<'ctx>, ExtraInfo), CompileError> {
-        self.stack.pop().ok_or(CompileError::Codegen("pop1_extra: invalid value stack".to_string()))
+        self.stack.pop().ok_or(CompileError::Codegen(
+            "pop1_extra: invalid value stack".to_string(),
+        ))
     }
 
     pub fn pop2(&mut self) -> Result<(BasicValueEnum<'ctx>, BasicValueEnum<'ctx>), CompileError> {
@@ -318,7 +328,13 @@ impl<'ctx> State<'ctx> {
     }
 
     pub fn peek1_extra(&self) -> Result<(BasicValueEnum<'ctx>, ExtraInfo), CompileError> {
-        let index = self.stack.len().checked_sub(1).ok_or(CompileError::Codegen("peek1_extra: invalid value stack".to_string()))?;
+        let index = self
+            .stack
+            .len()
+            .checked_sub(1)
+            .ok_or(CompileError::Codegen(
+                "peek1_extra: invalid value stack".to_string(),
+            ))?;
         Ok(self.stack[index])
     }
 
@@ -330,7 +346,13 @@ impl<'ctx> State<'ctx> {
         &self,
         n: usize,
     ) -> Result<&[(BasicValueEnum<'ctx>, ExtraInfo)], CompileError> {
-        let index = self.stack.len().checked_sub(n).ok_or(CompileError::Codegen("peekn_extra: invalid value stack".to_string()))?;
+        let index = self
+            .stack
+            .len()
+            .checked_sub(n)
+            .ok_or(CompileError::Codegen(
+                "peekn_extra: invalid value stack".to_string(),
+            ))?;
         Ok(&self.stack[index..])
     }
 
@@ -344,7 +366,13 @@ impl<'ctx> State<'ctx> {
     }
 
     pub fn popn(&mut self, n: usize) -> Result<(), CompileError> {
-        let index = self.stack.len().checked_sub(n).ok_or(CompileError::Codegen("popn: invalid value stack".to_string()))?;
+        let index = self
+            .stack
+            .len()
+            .checked_sub(n)
+            .ok_or(CompileError::Codegen(
+                "popn: invalid value stack".to_string(),
+            ))?;
 
         self.stack.truncate(index);
         Ok(())

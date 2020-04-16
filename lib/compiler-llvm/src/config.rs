@@ -2,11 +2,13 @@
 #![allow(unused_imports, dead_code)]
 
 use crate::compiler::LLVMCompiler;
-use wasmer_compiler::{Compiler, CompilerConfig, CpuFeature, Features, Target};
-use inkwell::targets::{Target as LLVMTarget, TargetMachine, TargetTriple, InitializationConfig, CodeModel, RelocMode};
+use inkwell::targets::{
+    CodeModel, InitializationConfig, RelocMode, Target as LLVMTarget, TargetMachine, TargetTriple,
+};
 use inkwell::OptimizationLevel;
 use itertools::Itertools;
 use target_lexicon::Architecture;
+use wasmer_compiler::{Compiler, CompilerConfig, CpuFeature, Features, Target};
 
 #[derive(Clone)]
 pub struct LLVMConfig {
@@ -79,8 +81,9 @@ impl LLVMConfig {
         }
 
         // The CPU features formatted as LLVM strings
-        let llvm_cpu_features = cpu_features.iter().filter_map(|feature| {
-            match feature {
+        let llvm_cpu_features = cpu_features
+            .iter()
+            .filter_map(|feature| match feature {
                 CpuFeature::SSE2 => Some("+sse2"),
                 CpuFeature::SSE3 => Some("+sse3"),
                 CpuFeature::SSSE3 => Some("+ssse3"),
@@ -94,20 +97,21 @@ impl LLVMConfig {
                 CpuFeature::AVX512DQ => Some("+avx512dq"),
                 CpuFeature::AVX512VL => Some("+avx512vl"),
                 CpuFeature::LZCNT => Some("+lzcnt"),
-            }
-        }).join(",");
+            })
+            .join(",");
 
         let arch_string = triple.architecture.to_string();
         let llvm_target = LLVMTarget::from_name(&arch_string).unwrap();
-        let target_machine = llvm_target.create_target_machine(
-            &self.target_triple(),
-            &arch_string,
-            &llvm_cpu_features,
-            self.opt_level.clone(),
-            self.reloc_mode(),
-            self.code_model(),
-        )
-        .unwrap();
+        let target_machine = llvm_target
+            .create_target_machine(
+                &self.target_triple(),
+                &arch_string,
+                &llvm_cpu_features,
+                self.opt_level.clone(),
+                self.reloc_mode(),
+                self.code_model(),
+            )
+            .unwrap();
         target_machine
     }
 }

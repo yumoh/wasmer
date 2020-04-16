@@ -2,16 +2,16 @@
 // Allow unused imports while developing.
 #![allow(unused_imports, dead_code)]
 
-use crate::config::LLVMConfig;
 use crate::code::FuncTranslator;
+use crate::config::LLVMConfig;
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use wasm_common::entity::{EntityRef, PrimaryMap};
 use wasm_common::Features;
 use wasm_common::{DefinedFuncIndex, FuncIndex, FuncType};
 use wasmer_compiler::FunctionBodyData;
-use wasmer_compiler::{CompileError, Compilation, CompiledFunction, Compiler};
-use wasmer_compiler::{CompilerConfig, ModuleTranslationState, Target};
 use wasmer_compiler::Module;
+use wasmer_compiler::{Compilation, CompileError, CompiledFunction, Compiler};
+use wasmer_compiler::{CompilerConfig, ModuleTranslationState, Target};
 use wasmer_compiler::{TrapCode, TrapInformation};
 
 use inkwell::targets::{InitializationConfig, Target as InkwellTarget};

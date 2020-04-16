@@ -2,10 +2,10 @@
 use wasmer_runtime_core::parse::{wp_type_to_type, LoadError};
 use wasmer_runtime_core::types::Type;
  */
-use wasmparser::TypeOrFuncType as WpTypeOrFuncType;
-use wasmparser::Type as WpType;
 use wasm_common::Type;
 use wasmer_compiler::CompileError;
+use wasmparser::Type as WpType;
+use wasmparser::TypeOrFuncType as WpTypeOrFuncType;
 
 fn wp_type_to_type(ty: WpType) -> Result<Type, CompileError> {
     match ty {
@@ -27,8 +27,8 @@ pub fn blocktype_to_type(ty: WpTypeOrFuncType) -> Result<Type, CompileError> {
         WpTypeOrFuncType::Type(inner_ty) => Ok(wp_type_to_type(inner_ty)?),
         _ => {
             return Err(CompileError::Codegen(
-                    "the wasmer llvm backend does not yet support the multi-value return extension"
-                        .to_string(),
+                "the wasmer llvm backend does not yet support the multi-value return extension"
+                    .to_string(),
             ));
         }
     }
