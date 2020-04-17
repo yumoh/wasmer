@@ -209,7 +209,7 @@ impl LLVMBackend {
     pub fn new(
         module: Rc<RefCell<Module>>,
         _intrinsics: Intrinsics,
-        //        _stackmaps: &StackmapRegistry,
+        // _stackmaps: &StackmapRegistry,
         _module_info: &ModuleInfo,
         target_machine: &TargetMachine,
         llvm_callbacks: &Option<Rc<RefCell<dyn LLVMCallbacks>>>,
