@@ -6,7 +6,6 @@ use crate::{
     // LLVMBackendConfig, LLVMCallbacks,
 };
 use inkwell::{
-    // AddressSpace,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
@@ -26,6 +25,7 @@ use inkwell::{
         VectorValue,
         // PhiValue,
     },
+    AddressSpace,
     // OptimizationLevel,
     AtomicOrdering,
     AtomicRMWBinOp,
@@ -51,7 +51,10 @@ use wasmer_runtime_core::{
 */
 use crate::config::LLVMConfig;
 use wasm_common::entity::SecondaryMap;
-use wasm_common::{DefinedFuncIndex, FuncIndex, FuncType, GlobalIndex, MemoryIndex, Type};
+use wasm_common::{
+    DefinedFuncIndex, FuncIndex, FuncType, GlobalIndex, MemoryIndex, SignatureIndex, TableIndex,
+    Type,
+};
 use wasmer_compiler::CompiledFunctionUnwindInfo;
 use wasmer_compiler::FunctionBodyData;
 use wasmer_compiler::MemoryStyle;
@@ -2059,16 +2062,12 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                     }
                 }
             }
-            Operator::CallIndirect {
-                index: _,
-                table_index: _,
-            } => {
-                // TODO
-                /*
-                let sig_index = SignatureIndex::new(index as usize);
-                let expected_dynamic_sigindex = ctx.dynamic_sigindex(sig_index, intrinsics);
+            Operator::CallIndirect { index, table_index } => {
+                let sigindex = SignatureIndex::from_u32(index);
+                let func_type = module.local.signatures.get(sigindex).unwrap();
+                let expected_dynamic_sigindex = ctx.dynamic_sigindex(sigindex, intrinsics);
                 let (table_base, table_bound) = ctx.table(
-                    TableIndex::new(table_index as usize),
+                    TableIndex::from_u32(table_index),
                     intrinsics,
                     self.module,
                     builder,
@@ -2200,14 +2199,13 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 builder.build_unreachable();
                 builder.position_at_end(continue_block);
 
-                let wasmer_fn_sig = &info.signatures[sig_index];
-                let fn_ty = signatures[sig_index];
+                let llvm_func_type = func_type_to_llvm(&self.context, &intrinsics, func_type);
 
-                let pushed_args = state.popn_save_extra(wasmer_fn_sig.params().len())?;
+                let pushed_args = state.popn_save_extra(func_type.params().len())?;
 
                 let args: Vec<_> = std::iter::once(ctx_ptr)
                     .chain(pushed_args.into_iter().enumerate().map(|(i, (v, info))| {
-                        match wasmer_fn_sig.params()[i] {
+                        match func_type.params()[i] {
                             Type::F32 => builder.build_bitcast(
                                 apply_pending_canonicalization(builder, intrinsics, v, info),
                                 intrinsics.f32_ty,
@@ -2228,10 +2226,11 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
 
                 let typed_func_ptr = builder.build_pointer_cast(
                     func_ptr,
-                    fn_ty.ptr_type(AddressSpace::Generic),
+                    llvm_func_type.ptr_type(AddressSpace::Generic),
                     "typed_func_ptr",
                 );
 
+                /*
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2249,7 +2248,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         )
                     }
                 }
+                */
                 let call_site = builder.build_call(typed_func_ptr, &args, "indirect_call");
+                /*
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2263,12 +2264,13 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         )
                     }
                 }
+                */
 
-                match wasmer_fn_sig.returns() {
+                match func_type.results() {
                     [] => {}
                     [_] => {
                         let value = call_site.try_as_basic_value().left().unwrap();
-                        state.push1(match wasmer_fn_sig.returns()[0] {
+                        state.push1(match func_type.results()[0] {
                             Type::F32 => {
                                 builder.build_bitcast(value, intrinsics.f32_ty, "ret_cast")
                             }
@@ -2279,10 +2281,11 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         });
                     }
                     _ => {
-                        return Err(CompileError::Codegen("Operator::CallIndirect multi-value returns unimplemented".to_string()));
+                        return Err(CompileError::Codegen(
+                            "Operator::CallIndirect multi-value returns unimplemented".to_string(),
+                        ));
                     }
                 }
-                */
             }
 
             /***************************
