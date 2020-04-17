@@ -9,21 +9,15 @@ use inkwell::{
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
-    //passes::PassManager,
+    passes::PassManager,
     //targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple},
     targets::FileType,
     types::{
         BasicType, BasicTypeEnum, FloatMathType, FunctionType, IntType, PointerType, VectorType,
     },
     values::{
-        BasicValue,
-        BasicValueEnum,
-        FloatValue,
-        FunctionValue,
-        IntValue,
-        PointerValue,
+        BasicValue, BasicValueEnum, FloatValue, FunctionValue, IntValue, PhiValue, PointerValue,
         VectorValue,
-        // PhiValue,
     },
     AddressSpace,
     // OptimizationLevel,
@@ -35,20 +29,6 @@ use inkwell::{
 use smallvec::SmallVec;
 use std::any::Any;
 
-/*
-use wasmer_runtime_core::{
-    backend::{CacheGen, CompilerConfig, Token},
-    cache::{Artifact, Error as CacheError},
-    codegen::*,
-    memory::MemoryType,
-    module::{ModuleInfo, ModuleInner},
-    parse::{wp_type_to_type, LoadError},
-    structures::{Map, TypedIndex},
-    types::{
-        FuncIndex, GlobalIndex, LocalOrImport, MemoryIndex, SignatureIndex, TableIndex,
-    },
-};
-*/
 use crate::config::LLVMConfig;
 use wasm_common::entity::SecondaryMap;
 use wasm_common::{
@@ -132,8 +112,10 @@ impl FuncTranslator {
         let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_fn_type);
 
         let func = module.add_function(func_name, func_type, Some(Linkage::External));
+        func.set_personality_function(intrinsics.personality);
         let entry = self.ctx.append_basic_block(func, "entry");
         let start_of_code = self.ctx.append_basic_block(func, "start_of_code");
+        let return_ = self.ctx.append_basic_block(func, "return");
         let cache_builder = self.ctx.create_builder();
         let builder = self.ctx.create_builder();
         cache_builder.position_at_end(entry);
@@ -141,11 +123,22 @@ impl FuncTranslator {
         cache_builder.position_before(&br);
         builder.position_at_end(start_of_code);
 
+        let mut state = State::new();
+        builder.position_at_end(return_);
+        let phis: SmallVec<[PhiValue; 1]> = wasm_fn_type
+            .results()
+            .iter()
+            .map(|&wasm_ty| type_to_llvm(&intrinsics, wasm_ty))
+            .map(|ty| builder.build_phi(ty, &state.var_name()))
+            .collect();
+        state.push_block(return_, phis);
+        builder.position_at_end(start_of_code);
+
         let mut fcg = LLVMFunctionCodeGenerator {
             context: &self.ctx,
             builder,
             intrinsics: &intrinsics,
-            state: State::new(),
+            state,
             function: func,
             locals: vec![],
             ctx: CtxType::new(wasm_module, &func, &cache_builder),
@@ -186,7 +179,73 @@ impl FuncTranslator {
         let op = reader.read_operator().map_err(to_wasm_error)?;
         fcg.translate_operator(op, wasm_module, pos)?;
 
-        // TODO: finalize
+        let results = fcg.state.popn_save_extra(wasm_fn_type.results().len())?;
+        match results.as_slice() {
+            [] => {
+                fcg.builder.build_return(None);
+            }
+            [(one_value, one_value_info)] => {
+                let builder = &fcg.builder;
+                let one_value = apply_pending_canonicalization(
+                    builder,
+                    &intrinsics,
+                    *one_value,
+                    *one_value_info,
+                );
+                builder.build_return(Some(&builder.build_bitcast(
+                    one_value.as_basic_value_enum(),
+                    type_to_llvm(&intrinsics, wasm_fn_type.results()[0]),
+                    "return",
+                )));
+            }
+            _ => {
+                return Err(CompileError::Codegen(
+                    "multi-value returns not yet implemented".to_string(),
+                ));
+            }
+        }
+
+        // TODO: llvm-callbacks pre-opt-ir
+        let pass_manager = PassManager::create(());
+
+        if config.enable_verifier {
+            pass_manager.add_verifier_pass();
+        }
+
+        pass_manager.add_type_based_alias_analysis_pass();
+        pass_manager.add_ipsccp_pass();
+        pass_manager.add_prune_eh_pass();
+        pass_manager.add_dead_arg_elimination_pass();
+        pass_manager.add_function_inlining_pass();
+        pass_manager.add_lower_expect_intrinsic_pass();
+        pass_manager.add_scalar_repl_aggregates_pass();
+        pass_manager.add_instruction_combining_pass();
+        pass_manager.add_jump_threading_pass();
+        pass_manager.add_correlated_value_propagation_pass();
+        pass_manager.add_cfg_simplification_pass();
+        pass_manager.add_reassociate_pass();
+        pass_manager.add_loop_rotate_pass();
+        pass_manager.add_loop_unswitch_pass();
+        pass_manager.add_ind_var_simplify_pass();
+        pass_manager.add_licm_pass();
+        pass_manager.add_loop_vectorize_pass();
+        pass_manager.add_instruction_combining_pass();
+        pass_manager.add_ipsccp_pass();
+        pass_manager.add_reassociate_pass();
+        pass_manager.add_cfg_simplification_pass();
+        pass_manager.add_gvn_pass();
+        pass_manager.add_memcpy_optimize_pass();
+        pass_manager.add_dead_store_elimination_pass();
+        pass_manager.add_bit_tracking_dce_pass();
+        pass_manager.add_instruction_combining_pass();
+        pass_manager.add_reassociate_pass();
+        pass_manager.add_cfg_simplification_pass();
+        pass_manager.add_slp_vectorize_pass();
+        pass_manager.add_early_cse_pass();
+
+        pass_manager.run_on(&mut module);
+
+        // TODO: llvm-callbacks llvm post-opt-ir
 
         let memory_buffer = target_machine
             .write_to_memory_buffer(&mut module, FileType::Object)

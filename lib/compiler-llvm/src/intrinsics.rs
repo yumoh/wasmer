@@ -8,7 +8,7 @@ use inkwell::{
     attributes::{Attribute, AttributeLoc},
     builder::Builder,
     context::Context,
-    module::Module,
+    module::{Linkage, Module},
     types::{BasicType, FloatType, IntType, PointerType, StructType, VectorType, VoidType},
     values::{
         BasicValue, BasicValueEnum, FloatValue, FunctionValue, InstructionValue, IntValue,
@@ -97,6 +97,8 @@ pub struct Intrinsics<'ctx> {
 
     pub expect_i1: FunctionValue<'ctx>,
     pub trap: FunctionValue<'ctx>,
+
+    pub personality: FunctionValue<'ctx>,
 
     pub void_ty: VoidType<'ctx>,
     pub i1_ty: IntType<'ctx>,
@@ -409,6 +411,11 @@ impl<'ctx> Intrinsics<'ctx> {
 
             expect_i1: module.add_function("llvm.expect.i1", ret_i1_take_i1_i1, None),
             trap: module.add_function("llvm.trap", void_ty.fn_type(&[], false), None),
+            personality: module.add_function(
+                "__gxx_personality_v0",
+                i32_ty.fn_type(&[], false),
+                Some(Linkage::External),
+            ),
 
             void_ty,
             i1_ty,
