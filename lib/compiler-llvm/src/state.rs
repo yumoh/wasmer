@@ -211,6 +211,10 @@ impl<'ctx> State<'ctx> {
         }
     }
 
+    pub fn has_control_frames(&self) -> bool {
+        return !self.control_stack.is_empty();
+    }
+
     pub fn reset_stack(&mut self, frame: &ControlFrame<'ctx>) {
         let stack_size_snapshot = match frame {
             ControlFrame::Block {

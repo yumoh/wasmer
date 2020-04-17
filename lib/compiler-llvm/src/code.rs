@@ -175,9 +175,11 @@ impl FuncTranslator {
             locals.push(alloca);
         }
 
-        let pos = reader.current_position() as u32;
-        let op = reader.read_operator().map_err(to_wasm_error)?;
-        fcg.translate_operator(op, wasm_module, pos)?;
+        while fcg.state.has_control_frames() {
+            let pos = reader.current_position() as u32;
+            let op = reader.read_operator().map_err(to_wasm_error)?;
+            fcg.translate_operator(op, wasm_module, pos)?;
+        }
 
         let results = fcg.state.popn_save_extra(wasm_fn_type.results().len())?;
         match results.as_slice() {
