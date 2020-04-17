@@ -6,6 +6,7 @@ use crate::{
     // LLVMBackendConfig, LLVMCallbacks,
 };
 use inkwell::{
+    // AddressSpace,
     builder::Builder,
     context::Context,
     module::{Linkage, Module},
@@ -50,16 +51,46 @@ use wasmer_runtime_core::{
 */
 use crate::config::LLVMConfig;
 use wasm_common::entity::SecondaryMap;
-use wasm_common::{DefinedFuncIndex, FuncType, GlobalIndex, MemoryIndex, Type};
+use wasm_common::{DefinedFuncIndex, FuncIndex, FuncType, GlobalIndex, MemoryIndex, Type};
 use wasmer_compiler::CompiledFunctionUnwindInfo;
 use wasmer_compiler::FunctionBodyData;
 use wasmer_compiler::MemoryStyle;
 use wasmer_compiler::Module as WasmerCompilerModule;
-use wasmer_compiler::{to_wasm_error, CompileError, CompiledFunction};
+use wasmer_compiler::{
+    to_wasm_error, wasm_unsupported, CompileError, CompiledFunction, WasmResult,
+};
 use wasmparser::{BinaryReader, MemoryImmediate, Operator};
+
+// TODO
+fn wptype_to_type(ty: wasmparser::Type) -> WasmResult<Type> {
+    match ty {
+        wasmparser::Type::I32 => Ok(Type::I32),
+        wasmparser::Type::I64 => Ok(Type::I64),
+        wasmparser::Type::F32 => Ok(Type::F32),
+        wasmparser::Type::F64 => Ok(Type::F64),
+        wasmparser::Type::V128 => Ok(Type::V128),
+        wasmparser::Type::AnyRef => Ok(Type::AnyRef),
+        wasmparser::Type::AnyFunc => Ok(Type::FuncRef),
+        ty => Err(wasm_unsupported!(
+            "wptype_to_irtype: parser wasm type {:?}",
+            ty
+        )),
+    }
+}
 
 pub struct FuncTranslator {
     ctx: Context,
+}
+
+fn const_zero<'ctx>(ty: BasicTypeEnum<'ctx>) -> BasicValueEnum<'ctx> {
+    match ty {
+        BasicTypeEnum::ArrayType(ty) => ty.const_zero().as_basic_value_enum(),
+        BasicTypeEnum::FloatType(ty) => ty.const_zero().as_basic_value_enum(),
+        BasicTypeEnum::IntType(ty) => ty.const_zero().as_basic_value_enum(),
+        BasicTypeEnum::PointerType(ty) => ty.const_zero().as_basic_value_enum(),
+        BasicTypeEnum::StructType(ty) => ty.const_zero().as_basic_value_enum(),
+        BasicTypeEnum::VectorType(ty) => ty.const_zero().as_basic_value_enum(),
+    }
 }
 
 impl FuncTranslator {
@@ -88,17 +119,14 @@ impl FuncTranslator {
         let target_machine = config.target_machine();
         module.set_triple(&target_triple);
         module.set_data_layout(&target_machine.get_target_data().get_data_layout());
+        let wasm_fn_type = wasm_module
+            .local
+            .signatures
+            .get(*wasm_module.local.functions.get(func_index).unwrap())
+            .unwrap();
 
         let intrinsics = Intrinsics::declare(&module, &self.ctx);
-        let func_type = func_type_to_llvm(
-            &self.ctx,
-            &intrinsics,
-            wasm_module
-                .local
-                .signatures
-                .get(*wasm_module.local.functions.get(func_index).unwrap())
-                .unwrap(),
-        );
+        let func_type = func_type_to_llvm(&self.ctx, &intrinsics, wasm_fn_type);
 
         let func = module.add_function(func_name, func_type, Some(Linkage::External));
         let entry = self.ctx.append_basic_block(func, "entry");
@@ -113,11 +141,11 @@ impl FuncTranslator {
         let mut fcg = LLVMFunctionCodeGenerator {
             context: &self.ctx,
             builder,
-            intrinsics,
+            intrinsics: &intrinsics,
             state: State::new(),
             function: func,
             locals: vec![],
-            ctx: CtxType::new(wasm_module, &func, cache_builder),
+            ctx: CtxType::new(wasm_module, &func, &cache_builder),
             unreachable_depth: 0,
             module: &module,
         };
@@ -125,7 +153,31 @@ impl FuncTranslator {
         let mut reader =
             BinaryReader::new_with_offset(function_body.data, function_body.module_offset);
 
-        // TODO: feed_locals
+        let mut params = vec![];
+        for idx in 0..wasm_fn_type.params().len() {
+            let ty = wasm_fn_type.params()[idx];
+            let ty = type_to_llvm(&intrinsics, ty);
+            let value = func.get_nth_param((idx + 1) as u32).unwrap();
+            // TODO: don't interleave allocas and stores.
+            let alloca = cache_builder.build_alloca(ty, "param");
+            cache_builder.build_store(alloca, value);
+            params.push(alloca);
+        }
+
+        let mut locals = vec![];
+        let num_locals = reader.read_local_count().map_err(to_wasm_error)?;
+        for _ in 0..num_locals {
+            let mut counter = 0;
+            let (_count, ty) = reader
+                .read_local_decl(&mut counter)
+                .map_err(to_wasm_error)?;
+            let ty = wptype_to_type(ty)?;
+            let ty = type_to_llvm(&intrinsics, ty);
+            // TODO: don't interleave allocas and stores.
+            let alloca = cache_builder.build_alloca(ty, "local");
+            cache_builder.build_store(alloca, const_zero(ty));
+            locals.push(alloca);
+        }
 
         let pos = reader.current_position() as u32;
         let op = reader.read_operator().map_err(to_wasm_error)?;
@@ -1092,7 +1144,7 @@ pub struct LLVMModuleCodeGenerator<'ctx> {
 pub struct LLVMFunctionCodeGenerator<'ctx, 'a> {
     context: &'ctx Context,
     builder: Builder<'ctx>,
-    intrinsics: Intrinsics<'ctx>,
+    intrinsics: &'a Intrinsics<'ctx>,
     state: State<'ctx>,
     function: FunctionValue<'ctx>,
     locals: Vec<PointerValue<'ctx>>, // Contains params and locals
@@ -1913,94 +1965,49 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                 };
                 state.push1_extra(res, info);
             }
-            Operator::Call { function_index: _ } => {
-                // TODO
+            Operator::Call { function_index } => {
+                let func_index = FuncIndex::from_u32(function_index);
+                let sigindex = module.local.functions.get(func_index).unwrap();
+                let func_type = module.local.signatures.get(*sigindex).unwrap();
+                let func_name = module.func_names.get(&func_index).unwrap();
+                let llvm_func_type = func_type_to_llvm(&self.context, &intrinsics, func_type);
+
+                let func =
+                    self.module
+                        .add_function(func_name, llvm_func_type, Some(Linkage::External));
+
+                let params: Vec<_> = std::iter::once(ctx.basic())
+                    .chain(
+                        state
+                            .peekn_extra(func_type.params().len())?
+                            .iter()
+                            .enumerate()
+                            .map(|(i, (v, info))| match func_type.params()[i] {
+                                Type::F32 => builder.build_bitcast(
+                                    apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                    intrinsics.f32_ty,
+                                    &state.var_name(),
+                                ),
+                                Type::F64 => builder.build_bitcast(
+                                    apply_pending_canonicalization(builder, intrinsics, *v, *info),
+                                    intrinsics.f64_ty,
+                                    &state.var_name(),
+                                ),
+                                Type::V128 => {
+                                    apply_pending_canonicalization(builder, intrinsics, *v, *info)
+                                }
+                                _ => *v,
+                            }),
+                    )
+                    .collect();
+
                 /*
-                let func_index = FuncIndex::new(function_index as usize);
-                let sigindex = info.func_assoc[func_index];
-                let llvm_sig = signatures[sigindex];
-                let func_sig = &info.signatures[sigindex];
+                let func_ptr = self.llvm_functions.borrow_mut()[&func_index];
 
-                let (params, func_ptr) = match func_index.local_or_import(info) {
-                    LocalOrImport::Local(_) => {
-                        let params: Vec<_> = std::iter::once(ctx.basic())
-                            .chain(
-                                state
-                                    .peekn_extra(func_sig.params().len())?
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, (v, info))| match func_sig.params()[i] {
-                                        Type::F32 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f32_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::F64 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f64_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::V128 => apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        _ => *v,
-                                    }),
-                            )
-                            .collect();
-
-                        let func_ptr = self.llvm_functions.borrow_mut()[&func_index];
-
-                        (params, func_ptr.as_global_value().as_pointer_value())
-                    }
-                    LocalOrImport::Import(import_func_index) => {
-                        let (func_ptr_untyped, ctx_ptr) =
-                            ctx.imported_func(import_func_index, intrinsics, self.module);
-
-                        let params: Vec<_> = std::iter::once(ctx_ptr.as_basic_value_enum())
-                            .chain(
-                                state
-                                    .peekn_extra(func_sig.params().len())?
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, (v, info))| match func_sig.params()[i] {
-                                        Type::F32 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f32_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::F64 => builder.build_bitcast(
-                                            apply_pending_canonicalization(
-                                                builder, intrinsics, *v, *info,
-                                            ),
-                                            intrinsics.f64_ty,
-                                            &state.var_name(),
-                                        ),
-                                        Type::V128 => apply_pending_canonicalization(
-                                            builder, intrinsics, *v, *info,
-                                        ),
-                                        _ => *v,
-                                    }),
-                            )
-                            .collect();
-
-                        let func_ptr_ty = llvm_sig.ptr_type(AddressSpace::Generic);
-                        let func_ptr = builder.build_pointer_cast(
-                            func_ptr_untyped,
-                            func_ptr_ty,
-                            "typed_func_ptr",
-                        );
-
-                        (params, func_ptr)
-                    }
-                };
-
-                state.popn(func_sig.params().len())?;
+                (params, func_ptr.as_global_value().as_pointer_value())
+                */
+                state.popn(func_type.params().len())?;
+                /*
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2018,7 +2025,9 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         )
                     }
                 }
-                let call_site = builder.build_call(func_ptr, &params, &state.var_name());
+                */
+                let call_site = builder.build_call(func, &params, &state.var_name());
+                /*
                 if self.track_state {
                     if let Some(offset) = opcode_offset {
                         let mut stackmaps = self.stackmaps.borrow_mut();
@@ -2032,9 +2041,10 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         )
                     }
                 }
+                */
 
                 if let Some(basic_value) = call_site.try_as_basic_value().left() {
-                    match func_sig.returns().len() {
+                    match func_type.results().len() {
                         1 => state.push1(basic_value),
                         count @ _ => {
                             // This is a multi-value return.
@@ -2048,7 +2058,6 @@ impl<'ctx, 'a> LLVMFunctionCodeGenerator<'ctx, 'a> {
                         }
                     }
                 }
-                */
             }
             Operator::CallIndirect {
                 index: _,

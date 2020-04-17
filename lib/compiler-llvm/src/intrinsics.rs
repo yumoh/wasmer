@@ -617,7 +617,7 @@ pub struct CtxType<'ctx, 'a> {
     ctx_ptr_value: PointerValue<'ctx>,
 
     wasm_module: &'a WasmerCompilerModule,
-    cache_builder: Builder<'ctx>,
+    cache_builder: &'a Builder<'ctx>,
 
     cached_signal_mem: Option<PointerValue<'ctx>>,
 
@@ -636,7 +636,7 @@ impl<'ctx, 'a> CtxType<'ctx, 'a> {
     pub fn new(
         wasm_module: &'a WasmerCompilerModule,
         func_value: &FunctionValue<'ctx>,
-        cache_builder: Builder<'ctx>,
+        cache_builder: &'a Builder<'ctx>,
     ) -> CtxType<'ctx, 'a> {
         CtxType {
             ctx_ptr_value: func_value.get_nth_param(0).unwrap().into_pointer_value(),
